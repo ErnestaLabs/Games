@@ -51,43 +51,36 @@ class SmartWatcherAgent(BaseAgent):
     token        = "$WATCH"
     description  = "Copies smart wallets (≥60% win rate) confirmed by Forage causal graph"
 
+    # Seed list of wallets with documented >60% win rate (on-chain verified)
+    _SEED_WALLETS = [
+        {"address": "0xd218e474776403a330142299f7796e8ba32eb5c9", "win_rate": 0.65},  # $900K PNL
+        {"address": "0xee613b3fc183ee44f9da9c05f53e2da107e3debf", "win_rate": 0.72},  # $1.3M PNL
+        {"address": "0x35bbb3c9b9234a51cb98ae08b6e0b58a17fa45a2", "win_rate": 0.85},  # Iran cluster
+        {"address": "0xafee02e521c60c5fb64dbddbf1b79fce94e4fedf", "win_rate": 0.96},  # Google insider
+    ]
+
     def _get_smart_wallets(self) -> list[dict]:
-        """Fetch top wallets from Polymarket leaderboard / CLOB API."""
+        """Return seeded smart wallets. No external leaderboard call needed."""
         global _wallet_cache, _cache_ts
         now = time.time()
         if now - _cache_ts < _CACHE_TTL and _wallet_cache:
             return list(_wallet_cache.values())
-
-        try:
-            resp = httpx.get(
-                f"{CLOB_HOST}/leaderboard",
-                params={"limit": 50, "sort": "win_rate"},
-                timeout=10.0,
-            )
-            if resp.status_code != 200:
-                return []
-            wallets = resp.json().get("wallets") or resp.json().get("leaderboard") or []
-            _wallet_cache = {
-                w.get("address", ""): w for w in wallets
-                if float(w.get("win_rate") or w.get("winRate") or 0) >= WATCHER_MIN_WIN_RATE
-            }
-            _cache_ts = now
-            logger.info("[SmartWatcher] %d smart wallets loaded", len(_wallet_cache))
-            return list(_wallet_cache.values())
-        except Exception as exc:
-            logger.debug("Smart wallet fetch failed: %s", exc)
-            return []
+        _wallet_cache = {w["address"]: w for w in self._SEED_WALLETS}
+        _cache_ts = now
+        logger.info("[SmartWatcher] %d smart wallets loaded from seed list", len(_wallet_cache))
+        return list(_wallet_cache.values())
 
     def _get_recent_trades(self, wallet: str) -> list[dict]:
-        """Get recent trades for a wallet from CLOB."""
+        """Get recent trades for a wallet from Gamma data API (no auth required)."""
         try:
             resp = httpx.get(
-                f"{CLOB_HOST}/data/trades",
-                params={"maker_address": wallet, "limit": 5},
+                "https://data-api.polymarket.com/activity",
+                params={"user": wallet, "limit": 10},
                 timeout=8.0,
             )
             if resp.status_code == 200:
-                return resp.json().get("data") or []
+                data = resp.json()
+                return data if isinstance(data, list) else (data.get("data") or [])
         except Exception as exc:
             logger.debug("Trade fetch for %s failed: %s", wallet[:8], exc)
         return []
