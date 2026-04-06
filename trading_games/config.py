@@ -10,7 +10,7 @@ from datetime import date
 
 # ── Game parameters ───────────────────────────────────────────────────────────
 
-GAME_START_DATE = date(2026, 4, 7)   # Day 1
+GAME_START_DATE = date(2026, 4, 7)   # Day 1 — live trading begins midnight tonight
 GAME_DAYS = 30
 
 # $100 USDC starting bankroll per agent (simulated in DRY_RUN)
@@ -56,6 +56,13 @@ GRAPH_API_SECRET  = os.environ.get("GRAPH_API_SECRET", "")
 APIFY_TOKEN       = os.environ.get("APIFY_TOKEN", "")
 FORAGE_ENDPOINT   = os.environ.get("FORAGE_ENDPOINT",
                                    "https://ernesta-labs--forage.apify.actor")
+
+# ── Kalshi (UK-legal execution) ───────────────────────────────────────────────
+
+KALSHI_API_KEY  = os.environ.get("KALSHI_API_KEY", "")
+KALSHI_EMAIL    = os.environ.get("KALSHI_EMAIL", "")
+KALSHI_PASSWORD = os.environ.get("KALSHI_PASSWORD", "")
+KALSHI_DEMO     = os.environ.get("KALSHI_DEMO", "false").lower() not in ("false", "0", "no")
 
 # ── Hyperliquid (HIP-4 arb) ───────────────────────────────────────────────────
 

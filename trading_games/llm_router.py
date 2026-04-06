@@ -116,19 +116,52 @@ def _kimi(system: str, prompt: str, max_tokens: int = 600) -> str:
 def _openrouter(
     model: str, system: str, prompt: str, max_tokens: int = 600
 ) -> str:
-    """
-    OpenRouter unified gateway — access any model by ID.
-    Falls back automatically when the primary key is set.
-    Example models:
-      google/gemini-2.0-flash-exp        (free, fast)
-      meta-llama/llama-3.3-70b-instruct  (free, good quality)
-      anthropic/claude-haiku-4-5         (via OR, no direct key needed)
-      deepseek/deepseek-chat             (via OR)
-    """
     return _openai_compat(
         "https://openrouter.ai/api/v1", OPENROUTER_API_KEY,
         model, system, prompt, max_tokens,
     )
+
+
+def _fusion(
+    models: list[str], system: str, prompt: str, max_tokens: int = 600
+) -> str:
+    """
+    OpenRouter Model Fusion (beta) — runs models in parallel, fuses into best result.
+    Used for CRITICAL tier decisions (trade signals, risk calls).
+    Passes `models` array; OpenRouter handles parallel execution and synthesis.
+    """
+    if not OPENROUTER_API_KEY:
+        return ""
+    try:
+        resp = httpx.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+                "X-Title": "ForageTrading/Fusion",
+            },
+            json={
+                "models": models,
+                "max_tokens": max_tokens,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+                "route": "fallback",          # fallback if fusion unavailable
+                "provider": {"allow_fallbacks": True},
+            },
+            timeout=45.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        # Fusion response may include a fused field or standard choices
+        fused = data.get("fused_response") or data.get("fusion_result")
+        if fused:
+            return fused.strip()
+        return data["choices"][0]["message"]["content"].strip()
+    except Exception as exc:
+        logger.debug("Model Fusion error: %s", exc)
+        return ""
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -154,12 +187,19 @@ def llm(
     OR_MEDIUM   = "google/gemini-2.0-flash-exp:free"
     OR_LOW      = "deepseek/deepseek-chat"
 
+    # Model Fusion ensemble for critical decisions
+    FUSION_MODELS = [
+        "anthropic/claude-sonnet-4-6",
+        "openai/gpt-4.1",
+        "google/gemini-2.5-pro-preview",
+    ]
+
     if priority == Priority.CRITICAL:
         cascade = [
+            ("fusion/claude+gpt+gemini",   lambda: _fusion(FUSION_MODELS, system, prompt, max_tokens)),
             ("or/claude-sonnet-4-6",       lambda: _openrouter(OR_CRITICAL, system, prompt, max_tokens)),
             ("claude-sonnet-4-6",          lambda: _claude(LLM_CRITICAL, system, prompt, max_tokens)),
             ("or/claude-haiku-4-5",        lambda: _openrouter(OR_HIGH, system, prompt, max_tokens)),
-            ("deepseek-chat",              lambda: _deepseek(system, prompt, max_tokens)),
         ]
     elif priority == Priority.HIGH:
         cascade = [
