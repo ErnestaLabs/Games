@@ -1,217 +1,107 @@
 """
-KalshiExecutor — UK-legal trade execution via Kalshi REST API.
+KalshiClient — read-only price feed from Kalshi for cross-platform arb detection.
 
-Kalshi is fully regulated in the US and unrestricted from the UK.
-Uses email/password login for demo accounts, or API key for production.
+No Kalshi account needed. The public market API requires no auth for reads.
+Use to find Kalshi/Polymarket price divergences, then execute on Polymarket
+via Railway EU West (Ireland IP — not geoblocked).
 
-API base: https://trading-api.kalshi.com/trade-api/v2
-Auth:     POST /login  → returns token  (or X-Mode: demo for sandbox)
-
-Market matching:
-  Given a Polymarket market question, find the equivalent Kalshi market
-  by keyword search. Execute on Kalshi first; fall back to Polymarket CLOB.
+Settlement divergence arb:
+  Kalshi settles on AP call (0–4h post-event).
+  Polymarket settles 24–48h later.
+  When Kalshi shows result=yes/no but Polymarket still trading at 0.85–0.97,
+  buy the near-certain side on Polymarket from Railway.
 """
 from __future__ import annotations
 
 import logging
-import os
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
-KALSHI_BASE   = os.environ.get("KALSHI_API_URL", "https://trading-api.kalshi.com/trade-api/v2")
-KALSHI_EMAIL  = os.environ.get("KALSHI_EMAIL", "")
-KALSHI_PASSWORD = os.environ.get("KALSHI_PASSWORD", "")
-KALSHI_API_KEY  = os.environ.get("KALSHI_API_KEY", "")   # alternative: API key auth
-KALSHI_DEMO   = os.environ.get("KALSHI_DEMO", "false").lower() not in ("false", "0", "no")
+KALSHI_BASE = "https://trading-api.kalshi.com/trade-api/v2"
 
 
-@dataclass
-class KalshiResult:
-    success: bool
-    order_id: Optional[str]
-    platform: str
-    side: str
-    size_usd: float
-    price: float
-    reason: str = ""
-
-
-class KalshiExecutor:
+class KalshiClient:
     """
-    Executes trades on Kalshi. Falls back gracefully when no matching market.
+    Read-only Kalshi price client. No account needed — public API.
+    Used to detect price divergences vs Polymarket and settlement gaps.
+    All execution happens on Polymarket via Railway Ireland.
     """
 
     def __init__(self) -> None:
-        self._token: Optional[str] = None
         self._http = httpx.Client(timeout=15.0)
-        self._login()
 
-    def _login(self) -> None:
-        """Login to Kalshi and cache bearer token."""
-        if KALSHI_API_KEY:
-            # API key auth — set as header directly
-            self._token = KALSHI_API_KEY
-            logger.info("KalshiExecutor: using API key auth")
-            return
-        if not KALSHI_EMAIL or not KALSHI_PASSWORD:
-            logger.warning("KalshiExecutor: no credentials set — disabled")
-            return
+    def get_open_markets(self, query: str = "", limit: int = 50) -> list[dict]:
+        """Fetch open Kalshi markets. No auth required."""
         try:
-            resp = self._http.post(
-                f"{KALSHI_BASE}/login",
-                json={"email": KALSHI_EMAIL, "password": KALSHI_PASSWORD},
-                headers={"X-Mode": "demo"} if KALSHI_DEMO else {},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            self._token = data.get("token") or data.get("access_token")
-            logger.info("KalshiExecutor: logged in (demo=%s)", KALSHI_DEMO)
-        except Exception as exc:
-            logger.error("KalshiExecutor login failed: %s", exc)
-
-    @property
-    def _headers(self) -> dict:
-        h = {"Content-Type": "application/json"}
-        if self._token:
-            h["Authorization"] = f"Bearer {self._token}"
-        if KALSHI_DEMO:
-            h["X-Mode"] = "demo"
-        return h
-
-    @property
-    def available(self) -> bool:
-        return bool(self._token)
-
-    # ── Market search ─────────────────────────────────────────────────────
-
-    def find_market(self, question: str, limit: int = 5) -> Optional[dict]:
-        """Find a Kalshi market matching the given question keywords."""
-        if not self.available:
-            return None
-        keywords = " ".join(w for w in question.split() if len(w) > 4)[:60]
-        try:
-            resp = self._http.get(
-                f"{KALSHI_BASE}/markets",
-                headers=self._headers,
-                params={"limit": limit, "status": "open", "search": keywords},
-            )
+            params: dict = {"limit": limit, "status": "open"}
+            if query:
+                params["search"] = query
+            resp = self._http.get(f"{KALSHI_BASE}/markets", params=params)
             if resp.status_code == 200:
-                markets = resp.json().get("markets") or []
-                if markets:
-                    # Return the most liquid match
-                    return max(markets, key=lambda m: m.get("volume", 0), default=None)
+                return resp.json().get("markets") or []
         except Exception as exc:
-            logger.debug("Kalshi market search failed: %s", exc)
-        return None
-
-    # ── Balance ──────────────────────────────────────────────────────────
-
-    def get_balance(self) -> float:
-        """Return available USD balance on Kalshi."""
-        if not self.available:
-            return 0.0
-        try:
-            resp = self._http.get(f"{KALSHI_BASE}/portfolio/balance", headers=self._headers)
-            if resp.status_code == 200:
-                data = resp.json()
-                cents = data.get("balance") or data.get("available_balance") or 0
-                return float(cents) / 100.0  # Kalshi uses cents
-        except Exception as exc:
-            logger.debug("Kalshi balance fetch failed: %s", exc)
-        return 0.0
-
-    # ── Order placement ──────────────────────────────────────────────────
-
-    def place_order(
-        self,
-        ticker: str,
-        side: str,
-        size_usd: float,
-        price: float,
-        dry_run: bool = True,
-    ) -> KalshiResult:
-        """
-        Place a limit order on Kalshi.
-
-        ticker: Kalshi market ticker (e.g. "INXD-23JAN4175")
-        side:   "yes" or "no"
-        size_usd: dollar amount (converted to cents internally)
-        price:  probability 0.01–0.99
-        """
-        if not self.available:
-            return KalshiResult(False, None, "kalshi", side, size_usd, price, "not authenticated")
-
-        count = max(1, int(size_usd / price))  # shares = $ / price
-        price_cents = int(round(price * 100))
-
-        logger.info(
-            "%s KALSHI ORDER: %s %s @ %d¢ | count=%d ($%.2f)",
-            "DRY_RUN" if dry_run else "LIVE",
-            ticker, side.upper(), price_cents, count, size_usd,
-        )
-
-        if dry_run:
-            fake_id = f"dry_kalshi_{ticker[:8]}_{int(datetime.now(timezone.utc).timestamp())}"
-            return KalshiResult(True, fake_id, "kalshi", side, size_usd, price, "DRY_RUN")
-
-        try:
-            resp = self._http.post(
-                f"{KALSHI_BASE}/portfolio/orders",
-                headers=self._headers,
-                json={
-                    "ticker": ticker,
-                    "action": "buy",
-                    "side": side.lower(),
-                    "type": "limit",
-                    "count": count,
-                    "yes_price" if side.lower() == "yes" else "no_price": price_cents,
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            order = data.get("order") or {}
-            order_id = order.get("order_id") or order.get("id")
-            return KalshiResult(True, order_id, "kalshi", side, size_usd, price)
-        except Exception as exc:
-            logger.error("Kalshi order failed: %s", exc)
-            return KalshiResult(False, None, "kalshi", side, size_usd, price, str(exc))
-
-    # ── Settlement divergence scanner ────────────────────────────────────
-
-    def scan_settled_markets(self) -> list[dict]:
-        """
-        Find markets that Kalshi has settled but are still trading on Polymarket.
-        These represent risk-free arbitrage windows.
-        Returns list of {ticker, result, settle_time, kalshi_price}.
-        """
-        if not self.available:
-            return []
-        try:
-            resp = self._http.get(
-                f"{KALSHI_BASE}/markets",
-                headers=self._headers,
-                params={"status": "finalized", "limit": 50},
-            )
-            if resp.status_code == 200:
-                markets = resp.json().get("markets") or []
-                settled = []
-                for m in markets:
-                    if m.get("result") in ("yes", "no"):
-                        settled.append({
-                            "ticker": m.get("ticker"),
-                            "title": m.get("title"),
-                            "result": m.get("result"),
-                            "settle_price": 1.0 if m.get("result") == "yes" else 0.0,
-                        })
-                return settled
-        except Exception as exc:
-            logger.debug("Kalshi settled market scan failed: %s", exc)
+            logger.debug("Kalshi open markets fetch failed: %s", exc)
         return []
+
+    def get_settled_markets(self, limit: int = 50) -> list[dict]:
+        """
+        Fetch recently settled Kalshi markets.
+        These may still be trading on Polymarket — settlement divergence arb window.
+        """
+        try:
+            resp = self._http.get(
+                f"{KALSHI_BASE}/markets",
+                params={"limit": limit, "status": "finalized"},
+            )
+            if resp.status_code == 200:
+                markets = resp.json().get("markets") or []
+                return [
+                    {
+                        "ticker": m.get("ticker"),
+                        "title": m.get("title"),
+                        "result": m.get("result"),      # "yes" or "no"
+                        "yes_price": 1.0 if m.get("result") == "yes" else 0.0,
+                    }
+                    for m in markets if m.get("result") in ("yes", "no")
+                ]
+        except Exception as exc:
+            logger.debug("Kalshi settled markets fetch failed: %s", exc)
+        return []
+
+    def find_divergence(
+        self, poly_question: str, poly_yes_price: float, min_spread: float = 0.05
+    ) -> Optional[dict]:
+        """
+        Search for a Kalshi market matching this Polymarket question.
+        Returns divergence info if spread > min_spread (default 5%).
+        """
+        keywords = " ".join(w for w in poly_question.split() if len(w) > 4)[:60]
+        markets = self.get_open_markets(query=keywords, limit=10)
+        for m in markets:
+            yes_ask = m.get("yes_ask") or m.get("yes_price") or 0.0
+            if yes_ask <= 0:
+                continue
+            spread = abs(float(yes_ask) / 100.0 - poly_yes_price)
+            if spread >= min_spread:
+                logger.info(
+                    "DIVERGENCE: Kalshi=%s %.2f vs Poly %.2f (spread=%.2f)",
+                    m.get("ticker"), yes_ask / 100.0, poly_yes_price, spread,
+                )
+                return {
+                    "kalshi_ticker": m.get("ticker"),
+                    "kalshi_title": m.get("title"),
+                    "kalshi_yes_price": float(yes_ask) / 100.0,
+                    "poly_yes_price": poly_yes_price,
+                    "spread": spread,
+                }
+        return None
 
     def close(self) -> None:
         self._http.close()
+
+
+# Keep old name as alias so agent_runner.py import doesn't break
+KalshiExecutor = KalshiClient

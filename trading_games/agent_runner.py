@@ -26,6 +26,7 @@ import httpx
 from trading_games.config import (
     CLOB_HOST, DRY_RUN, STARTING_BANKROLL_USDC, SCORING_INTERVAL_SECS,
     GAME_START_DATE, GAME_DAYS, POLYGON_PRIVATE_KEY,
+    KALSHI_API_KEY, KALSHI_EMAIL, KALSHI_PASSWORD,
 )
 from trading_games.scoring_engine import ScoringEngine
 from trading_games.agents.arbitor       import ArbitorAgent
@@ -35,6 +36,7 @@ from trading_games.agents.news_bolt     import NewsBoltAgent
 from trading_games.agents.smart_watcher import SmartWatcherAgent
 from polymarket.prediction_store import PredictionStore
 from polymarket.order_executor import OrderExecutor
+from trading_games.kalshi_executor import KalshiExecutor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -346,6 +348,10 @@ def main() -> None:
         initial_bankroll=bankroll,
         dry_run=DRY_RUN,
     )
+
+    # Kalshi — read-only price feed for divergence detection (no account needed)
+    kalshi = KalshiExecutor()
+    logger.info("Kalshi price feed active — monitoring for Poly/Kalshi divergences")
 
     agents  = [
         ArbitorAgent(),
