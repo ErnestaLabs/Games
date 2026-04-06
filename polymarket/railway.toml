@@ -1,0 +1,7 @@
+[build]
+dockerfilePath = "polymarket/Dockerfile"
+
+[deploy]
+startCommand = "python run_all.py"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
