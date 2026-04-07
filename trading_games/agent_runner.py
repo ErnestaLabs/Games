@@ -355,6 +355,42 @@ def scan_once(
                 len(markets), len(agents), DRY_RUN, ig is not None)
     total_signals = 0
 
+    # ── Direct IG execution for pre-mapped signals ────────────────────────────
+    # IG Intelligence ideas and cross-venue signals already have epic + direction.
+    # Agents won't recognize these dicts, so execute them directly here.
+    if ig:
+        for market in markets:
+            epic = market.get("_ig_epic", "")
+            if not epic:
+                continue
+            confidence = float(market.get("confidence", 0))
+            if confidence < 0.55:
+                continue
+            edge = float(market.get("edge", confidence - 0.5))
+            if edge < 0.05:
+                continue
+            direction = market.get("_ig_direction", "BUY")
+            stop_distance = float(os.environ.get("IG_STOP_DISTANCE", "0")) or None
+            size_usdc = max(edge * 0.25 * 100.0, 0.50)   # Kelly-sized, min £0.50/pt equivalent
+
+            ig_result = ig.execute_from_signal(
+                question=market.get("question", "")[:120],
+                side=direction,
+                size_usdc=size_usdc,
+                edge=edge,
+                epic=epic,
+                stop_distance=stop_distance,
+            )
+            if ig_result.success:
+                total_signals += 1
+                logger.info(
+                    "IG DIRECT: %s %s | confidence=%.0f%% | pattern=%s | deal=%s",
+                    direction, epic, confidence * 100,
+                    market.get("_signal_type", "?"),
+                    ig_result.deal_id or "demo",
+                )
+
+    # ── Agent-driven execution (Polymarket + Forage entity signals) ───────────
     for market in markets:
         with ThreadPoolExecutor(max_workers=5) as ex:
             futures = {ex.submit(_process_agent, agent, market): agent for agent in agents}
