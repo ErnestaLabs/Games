@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -84,10 +85,29 @@ class PredictionStore:
             "is_fee_free": signal.is_fee_free,
             "token_id": signal.token_id,
             "predicted_at": _now_iso(),
-            "outcome": None,        # filled by resolution_checker
-            "simulated_pnl": None,  # filled by resolution_checker
+            "outcome": None,
+            "simulated_pnl": None,
             "resolved_at": None,
+            "agent": getattr(signal, "agent", ""),
         }
+
+        # In dry-run mode, simulate outcome immediately for feedback.
+        # In live mode, outcome stays null until market resolves.
+        _dry = os.environ.get("DRY_RUN", "true").lower() not in ("false", "0", "no")
+        if _dry:
+            win_prob = max(0.05, min(0.95, signal.graph_prob))
+            won = random.random() < win_prob
+            if won:
+                pnl = round(simulated_size_usdc * abs(signal.edge), 4)
+                record["outcome"] = "correct"
+            else:
+                pnl = round(-simulated_size_usdc * signal.market_price, 4)
+                record["outcome"] = "incorrect"
+            record["simulated_pnl"] = pnl
+            record["resolved_at"] = _now_iso()
+            logger.info("  [SIM] %s %s | win_prob=%.0f%% → %s | P&L=$%.2f",
+                        signal.side, signal.market_id[:12], win_prob * 100,
+                        record["outcome"].upper(), pnl)
 
         self._write_local(record)
         self._write_graph(record)

@@ -63,7 +63,6 @@ def _build_clob_client():
             host=CLOB_HOST,
             key=POLYGON_PRIVATE_KEY,
             chain_id=137,
-            api_key=relayer_key or None,
         )
         client.set_api_creds(client.create_or_derive_api_creds())
         logger.info("ClobClient initialised with L2 auth (live trading ready)")
@@ -194,7 +193,7 @@ def _process_agent(agent, market: dict) -> dict | None:
             signal.setdefault("causal_triggers", [])
         return signal
     except Exception as exc:
-        logger.debug("[%s] analyze_market error: %s", agent.name, exc)
+        logger.warning("[%s] analyze_market error: %s", agent.name, exc)
         return None
 
 
@@ -222,23 +221,30 @@ def scan_once(
                 if not signal:
                     continue
 
-                from polymarket.edge_calculator import TradeSignal
-                ts = TradeSignal(
-                    market_id=signal["market_id"],
-                    question=signal["question"],
-                    side=signal.get("side", "YES"),
-                    token_id=signal.get("token_id", ""),
-                    tick_size=signal.get("tick_size", "0.01"),
-                    market_price=signal.get("market_price", 0.5),
-                    graph_prob=signal.get("graph_prob", 0.5),
-                    edge=signal.get("edge", 0.0),
-                    kelly_size=signal.get("edge", 0.0) * 0.25,
-                    min_order_size=signal.get("min_order_size", 1.0),
-                    signal_type=signal.get("signal_type", "composite"),
-                    causal_triggers=signal.get("causal_triggers", []),
-                    confidence=signal.get("confidence", 0.5),
-                    is_fee_free=signal.get("is_fee_free", False),
-                )
+                try:
+                    from polymarket.edge_calculator import TradeSignal
+                    ts = TradeSignal(
+                        market_id=signal["market_id"],
+                        question=signal["question"],
+                        side=signal.get("side", "YES"),
+                        token_id=signal.get("token_id", ""),
+                        tick_size=signal.get("tick_size", "0.01"),
+                        market_price=signal.get("market_price", 0.5),
+                        graph_prob=signal.get("graph_prob", 0.5),
+                        edge=signal.get("edge", 0.0),
+                        kelly_size=signal.get("edge", 0.0) * 0.25,
+                        min_order_size=signal.get("min_order_size", 1.0),
+                        signal_type=signal.get("signal_type", "composite"),
+                        causal_triggers=signal.get("causal_triggers", []),
+                        confidence=signal.get("confidence", 0.5),
+                        is_fee_free=signal.get("is_fee_free", False),
+                        fee_schedule=signal.get("fee_schedule", {"maker": 0.0, "taker": 0.02}),
+                        agent=signal.get("agent", ""),
+                    )
+                except Exception as ts_err:
+                    logger.warning("TradeSignal build failed for %s: %s | signal=%s",
+                                   signal.get("market_id","?")[:16], ts_err, list(signal.keys()))
+                    continue
 
                 if executor:
                     # Live or dry-run execution via OrderExecutor

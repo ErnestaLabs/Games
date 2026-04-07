@@ -213,14 +213,13 @@ class OrderExecutor:
 
         # ── Live execution ───────────────────────────────────────────────
         try:
-            from py_clob_client.clob_types import OrderArgs, OrderType
+            from py_clob_client.clob_types import OrderArgs
 
             order_args = OrderArgs(
                 token_id=signal.token_id,
                 price=price,
                 size=size_usdc / price,  # convert USDC to shares
                 side=signal.side,
-                order_type=OrderType.FOK,
             )
             resp = self._clob.create_order(order_args)
             order_id = resp.get("orderID") or resp.get("order_id") or ""
