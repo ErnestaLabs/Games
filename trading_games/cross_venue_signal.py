@@ -26,6 +26,9 @@ from typing import Iterator
 
 import httpx
 
+FORAGE_GRAPH_URL = os.environ.get("FORAGE_GRAPH_URL", "https://forage-graph-production.up.railway.app")
+GRAPH_API_SECRET = os.environ.get("GRAPH_API_SECRET", "")
+
 logger = logging.getLogger(__name__)
 
 DIVERGENCE_THRESHOLD = float(os.environ.get("DIVERGENCE_THRESHOLD", "0.04"))   # 4 cents
@@ -315,7 +318,87 @@ class CrossVenueSignalDetector:
 
         result = list(seen_epics.values())
         logger.info("[CrossVenue] %d actionable signals", len(result))
+
+        # Push everything — PM markets, Kalshi markets, divergence signals — to graph
+        self._push_to_graph(pm_markets, kalshi_markets, result)
+
         return result
+
+    def _push_to_graph(
+        self,
+        pm_markets: list[dict],
+        kalshi_markets: list[dict],
+        signals: list["DivergenceSignal"],
+    ) -> None:
+        if not GRAPH_API_SECRET:
+            return
+        nodes: list[dict] = []
+
+        # Polymarket market nodes
+        for m in pm_markets[:50]:
+            q   = m.get("question") or m.get("title") or ""
+            mid = m.get("conditionId") or m.get("id") or ""
+            if not mid:
+                continue
+            price = self._extract_yes_price(m)
+            nodes.append({
+                "id":       f"pm_market_{mid}",
+                "type":     "PredictionMarket",
+                "name":     q[:200],
+                "venue":    "polymarket",
+                "yes_price": price,
+                "volume":   m.get("volume") or m.get("volume24hr") or 0,
+                "end_date": m.get("endDate") or m.get("end_date") or "",
+                "source":   "polymarket_api",
+            })
+
+        # Kalshi market nodes
+        for m in kalshi_markets[:50]:
+            q   = m.get("title") or m.get("question") or ""
+            mid = m.get("ticker") or m.get("market_id") or m.get("id") or ""
+            if not mid:
+                continue
+            price = self._extract_yes_price(m)
+            nodes.append({
+                "id":       f"kalshi_market_{mid}",
+                "type":     "PredictionMarket",
+                "name":     q[:200],
+                "venue":    "kalshi",
+                "yes_price": price,
+                "volume":   m.get("volume") or 0,
+                "close_time": m.get("close_time") or "",
+                "source":   "kalshi_api",
+            })
+
+        # Cross-venue divergence signal nodes
+        for s in signals:
+            nodes.append({
+                "id":          f"crossvenue_{s.market_id}",
+                "type":        "Signal",
+                "name":        f"Cross-venue: {s.question[:100]}",
+                "signal_type": s.signal_type,
+                "pm_price":    s.pm_price,
+                "kalshi_price": s.kalshi_price,
+                "divergence":  s.divergence,
+                "ig_epic":     s.ig_epic,
+                "direction":   s.direction,
+                "confidence":  s.confidence,
+                "rationale":   s.rationale,
+                "source":      "cross_venue_detector",
+            })
+
+        if not nodes:
+            return
+        try:
+            resp = self._http.post(
+                f"{FORAGE_GRAPH_URL}/ingest/bulk",
+                headers={"Authorization": f"Bearer {GRAPH_API_SECRET}", "Content-Type": "application/json"},
+                json={"nodes": nodes, "source": "cross_venue_signal"},
+                timeout=10.0,
+            )
+            logger.info("[CrossVenue] Pushed %d nodes to graph | status=%d", len(nodes), resp.status_code)
+        except Exception as exc:
+            logger.warning("[CrossVenue] Graph push failed: %s", exc)
 
     def close(self) -> None:
         self._http.close()

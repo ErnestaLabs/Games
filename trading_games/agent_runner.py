@@ -24,8 +24,8 @@ from datetime import datetime, timezone, date
 import httpx
 
 from trading_games.config import (
-    CLOB_HOST, DRY_RUN, STARTING_BANKROLL_USDC, SCORING_INTERVAL_SECS,
-    GAME_START_DATE, GAME_DAYS, POLYGON_PRIVATE_KEY,
+    DRY_RUN, STARTING_BANKROLL_USDC, SCORING_INTERVAL_SECS,
+    GAME_START_DATE, GAME_DAYS,
     KALSHI_API_KEY, KALSHI_EMAIL, KALSHI_PASSWORD,
     IG_API_KEY, IG_USERNAME, IG_PASSWORD, IG_ACCOUNT_ID, IG_DEMO,
 )
@@ -133,22 +133,7 @@ def _normalise_market(m: dict) -> dict:
         except Exception:
             token_ids = []
 
-    # If Gamma didn't provide token IDs, try fetching them from the CLOB
-    if not any(token_ids):
-        condition_id = m.get("conditionId") or m.get("condition_id") or m.get("id", "")
-        if condition_id and len(condition_id) > 10:
-            try:
-                clob_resp = httpx.get(
-                    f"https://clob.polymarket.com/markets/{condition_id}",
-                    timeout=5.0,
-                )
-                if clob_resp.status_code == 200:
-                    clob_data = clob_resp.json()
-                    clob_tokens = clob_data.get("tokens") or []
-                    if clob_tokens:
-                        token_ids = [t.get("token_id", "") for t in clob_tokens]
-            except Exception:
-                pass
+    # Token IDs are not needed for IG spread-bet execution (UK-only path)
 
     if not token_ids:
         token_ids = ["", ""]
@@ -168,32 +153,10 @@ def _normalise_market(m: dict) -> dict:
 
 def fetch_markets(limit: int = MARKET_PAGE_SIZE) -> list[dict]:
     """
-    Fetch active Polymarket markets from the CLOB API (primary) — CLOB markets
-    always have token IDs so orders can be placed. Gamma is used as an
-    enrichment source to add price data where missing.
+    Fetch active Polymarket markets from Gamma API (read-only intel feed).
+    CLOB API is not used — UK execution goes through IG spread betting only.
     """
-    clob_markets: list[dict] = []
-
-    # Primary: CLOB API (guaranteed to have token_ids)
-    try:
-        resp = httpx.get(
-            f"{CLOB_HOST}/markets",
-            params={"active": "true", "closed": "false", "limit": limit},
-            timeout=15.0,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            raw = data.get("data") or data.get("markets") or []
-            if raw:
-                clob_markets = [_normalise_market(m) for m in raw]
-                logger.info("Fetched %d markets from CLOB API", len(clob_markets))
-    except Exception as exc:
-        logger.warning("CLOB market fetch failed: %s", exc)
-
-    if clob_markets:
-        return clob_markets
-
-    # Fallback: Gamma API (may lack clobTokenIds — orders will be skipped)
+    # Gamma API — public, read-only, not geoblocked, no auth required
     try:
         resp = httpx.get(
             "https://gamma-api.polymarket.com/markets",
@@ -204,7 +167,6 @@ def fetch_markets(limit: int = MARKET_PAGE_SIZE) -> list[dict]:
         if resp.status_code == 200:
             markets = resp.json()
             if isinstance(markets, list) and markets:
-                logger.warning("Falling back to Gamma API — token IDs may be missing")
                 return [_normalise_market(m) for m in markets]
     except Exception as exc:
         logger.debug("Gamma API failed: %s", exc)
@@ -433,7 +395,9 @@ def scan_once(
                         total_signals += 1
 
                 if not acted:
-                    if executor:
+                    # IG is the only live execution path — never fall back to
+                    # Polymarket CLOB (geoblocked in UK). Record as simulated.
+                    if executor and not ig:
                         result = executor.execute(ts)
                         if result.success:
                             store.record(ts, simulated_size_usdc=result.size_usdc)
@@ -525,24 +489,11 @@ def main() -> None:
     parser.add_argument("--score", action="store_true", help="Print standings and exit")
     args = parser.parse_args()
 
-    # ── Wallet + ClobClient ───────────────────────────────────────────────
-    clob   = _build_clob_client()
-    bankroll = _get_balance(clob)
-
-    if not DRY_RUN:
-        if not POLYGON_PRIVATE_KEY:
-            logger.error("POLYGON_PRIVATE_KEY required for live trading. Set it in .env then rerun.")
-            return
-        logger.info("LIVE TRADING ACTIVE — bankroll=$%.2f USDC | wallet=%s",
-                    bankroll, (clob.get_address() if hasattr(clob, 'get_address') else "N/A"))
-    else:
-        logger.info("DRY_RUN=True — no real orders (set DRY_RUN=false to go live)")
-
-    executor = OrderExecutor(
-        clob_client=clob,
-        initial_bankroll=bankroll,
-        dry_run=DRY_RUN,
-    )
+    # UK execution is via IG spread betting — Polymarket CLOB is geoblocked.
+    # ClobClient is not initialised; executor is None (IG handles all live trades).
+    bankroll = STARTING_BANKROLL_USDC
+    executor = None
+    logger.info("Polymarket CLOB disabled (UK geoblocked) — execution via IG only | bankroll=$%.2f", bankroll)
 
     # Kalshi — read-only price feed for divergence detection (no account needed)
     kalshi = KalshiExecutor()
