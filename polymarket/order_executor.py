@@ -156,6 +156,22 @@ class OrderExecutor:
     # ── Execution ────────────────────────────────────────────────────────
 
     def execute(self, signal: TradeSignal) -> ExecutionResult:
+        if not signal.token_id:
+            logger.warning(
+                "SKIPPED [%s] — empty token_id (market not on CLOB yet)",
+                signal.market_id[:16],
+            )
+            return ExecutionResult(
+                success=False,
+                dry_run=self._dry_run,
+                order_id=None,
+                market_id=signal.market_id,
+                side=signal.side,
+                size_usdc=0.0,
+                price=signal.market_price,
+                reason="Empty token_id — market not tradeable on CLOB",
+            )
+
         size_usdc = self._compute_size(signal)
         ok, reason = self._check_risk(signal, size_usdc)
 

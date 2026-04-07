@@ -121,12 +121,32 @@ def _normalise_market(m: dict) -> dict:
         except Exception:
             outcomes = ["Yes", "No"]
 
-    token_ids = m.get("clobTokenIds") or ["", ""]
+    token_ids = m.get("clobTokenIds") or []
     if isinstance(token_ids, str):
         try:
             token_ids = _json.loads(token_ids)
         except Exception:
             token_ids = []
+
+    # If Gamma didn't provide token IDs, try fetching them from the CLOB
+    if not any(token_ids):
+        condition_id = m.get("conditionId") or m.get("condition_id") or m.get("id", "")
+        if condition_id and len(condition_id) > 10:
+            try:
+                clob_resp = httpx.get(
+                    f"https://clob.polymarket.com/markets/{condition_id}",
+                    timeout=5.0,
+                )
+                if clob_resp.status_code == 200:
+                    clob_data = clob_resp.json()
+                    clob_tokens = clob_data.get("tokens") or []
+                    if clob_tokens:
+                        token_ids = [t.get("token_id", "") for t in clob_tokens]
+            except Exception:
+                pass
+
+    if not token_ids:
+        token_ids = ["", ""]
 
     tokens = []
     for i, outcome in enumerate(outcomes):
