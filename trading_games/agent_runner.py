@@ -495,6 +495,18 @@ def main() -> None:
     executor = None
     logger.info("Polymarket CLOB disabled (UK geoblocked) — execution via IG only | bankroll=$%.2f", bankroll)
 
+    # Env-var diagnostic — logs presence (not values) of key secrets
+    _ig_key_present  = bool(os.environ.get("IG_API_KEY"))
+    _ig_user_present = bool(os.environ.get("IG_USERNAME"))
+    _ig_pass_present = bool(os.environ.get("IG_PASSWORD"))
+    logger.info(
+        "ENV DIAGNOSTIC | IG_API_KEY=%s IG_USERNAME=%s IG_PASSWORD=%s | STARTING_BANKROLL=%s",
+        "SET" if _ig_key_present  else "MISSING",
+        "SET" if _ig_user_present else "MISSING",
+        "SET" if _ig_pass_present else "MISSING",
+        os.environ.get("STARTING_BANKROLL", "NOT_SET"),
+    )
+
     # Kalshi — read-only price feed for divergence detection (no account needed)
     kalshi = KalshiExecutor()
     logger.info("Kalshi price feed active — monitoring for Poly/Kalshi divergences")
