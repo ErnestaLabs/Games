@@ -231,11 +231,12 @@ class OrderExecutor:
         try:
             from py_clob_client.clob_types import OrderArgs
 
+            clob_side = "BUY" if signal.side.upper() == "YES" else "SELL"
             order_args = OrderArgs(
                 token_id=signal.token_id,
                 price=price,
                 size=size_usdc / price,  # convert USDC to shares
-                side=signal.side,
+                side=clob_side,
             )
             resp = self._clob.create_order(order_args)
             order_id = resp.get("orderID") or resp.get("order_id") or ""
