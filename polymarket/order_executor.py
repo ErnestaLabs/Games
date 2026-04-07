@@ -238,7 +238,8 @@ class OrderExecutor:
                 size=size_usdc / price,  # convert USDC to shares
                 side=clob_side,
             )
-            resp = self._clob.create_order(order_args)
+            signed_order = self._clob.create_order(order_args)
+            resp = self._clob.post_order(signed_order)
             order_id = resp.get("orderID") or resp.get("order_id") or ""
             success = bool(order_id) or resp.get("success", False)
 
