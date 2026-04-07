@@ -27,6 +27,7 @@ from trading_games.config import (
     CLOB_HOST, DRY_RUN, STARTING_BANKROLL_USDC, SCORING_INTERVAL_SECS,
     GAME_START_DATE, GAME_DAYS, POLYGON_PRIVATE_KEY,
     KALSHI_API_KEY, KALSHI_EMAIL, KALSHI_PASSWORD,
+    IG_API_KEY, IG_USERNAME, IG_PASSWORD, IG_ACCOUNT_ID, IG_DEMO,
 )
 from trading_games.scoring_engine import ScoringEngine
 from trading_games.agents.arbitor       import ArbitorAgent
@@ -37,6 +38,7 @@ from trading_games.agents.smart_watcher import SmartWatcherAgent
 from polymarket.prediction_store import PredictionStore
 from polymarket.order_executor import OrderExecutor
 from trading_games.kalshi_executor import KalshiExecutor
+from trading_games.ig_executor import IGExecutor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -239,6 +241,7 @@ def scan_once(
     store: PredictionStore,
     engine: ScoringEngine,
     executor: OrderExecutor | None = None,
+    ig: "IGExecutor | None" = None,
 ) -> int:
     """One scan: fetch markets, run all agents, record signals, execute live orders."""
     markets = fetch_markets()
@@ -283,16 +286,32 @@ def scan_once(
                                    signal.get("market_id","?")[:16], ts_err, list(signal.keys()))
                     continue
 
-                if executor:
-                    # Live or dry-run execution via OrderExecutor
-                    result = executor.execute(ts)
-                    if result.success:
-                        store.record(ts, simulated_size_usdc=result.size_usdc)
+                acted = False
+
+                # IG spread betting (primary UK execution path)
+                if ig and ts.edge >= 0.05:
+                    size_usdc = ts.kelly_size * 100.0  # notional estimate
+                    ig_result = ig.execute_from_signal(
+                        question=ts.question,
+                        side=ts.side,
+                        size_usdc=size_usdc,
+                        edge=ts.edge,
+                    )
+                    if ig_result.success:
+                        store.record(ts, simulated_size_usdc=size_usdc)
                         total_signals += 1
-                else:
-                    # No executor — record as dry-run prediction only
-                    store.record(ts, simulated_size_usdc=10.0)
-                    total_signals += 1
+                        acted = True
+
+                if not acted:
+                    if executor:
+                        # Polymarket (non-UK or future use)
+                        result = executor.execute(ts)
+                        if result.success:
+                            store.record(ts, simulated_size_usdc=result.size_usdc)
+                            total_signals += 1
+                    else:
+                        store.record(ts, simulated_size_usdc=10.0)
+                        total_signals += 1
 
     logger.info("Scan complete: %d signals acted on", total_signals)
     return total_signals
@@ -334,6 +353,7 @@ def run_forever(
     store: PredictionStore,
     engine: ScoringEngine,
     executor: OrderExecutor | None = None,
+    ig: "IGExecutor | None" = None,
 ) -> None:
     day_today = _day_index()
     last_score_ts = 0.0
@@ -345,7 +365,7 @@ def run_forever(
     while True:
         now_ts = time.time()
 
-        scan_once(agents, store, engine, executor)
+        scan_once(agents, store, engine, executor, ig)
 
         # Daily scoring at midnight UTC
         current_day = _day_index()
@@ -396,6 +416,24 @@ def main() -> None:
     kalshi = KalshiExecutor()
     logger.info("Kalshi price feed active — monitoring for Poly/Kalshi divergences")
 
+    # IG Group — UK spread betting execution (live if IG_API_KEY set)
+    ig: IGExecutor | None = None
+    if IG_API_KEY and IG_USERNAME and IG_PASSWORD:
+        ig = IGExecutor(
+            api_key=IG_API_KEY,
+            username=IG_USERNAME,
+            password=IG_PASSWORD,
+            account_id=IG_ACCOUNT_ID,
+            demo=IG_DEMO,
+        )
+        if ig.login():
+            logger.info("IG spread betting active | demo=%s | %s", IG_DEMO, ig.status_summary())
+        else:
+            logger.warning("IG login failed — spread betting disabled")
+            ig = None
+    else:
+        logger.info("IG_API_KEY/IG_USERNAME/IG_PASSWORD not set — spread betting inactive")
+
     agents  = [
         ArbitorAgent(),
         CausalProphetAgent(),
@@ -410,13 +448,15 @@ def main() -> None:
         if args.score:
             engine.print_standings()
         elif args.once:
-            scan_once(agents, store, engine, executor)
+            scan_once(agents, store, engine, executor, ig)
             engine.print_standings()
         else:
-            run_forever(agents, store, engine, executor)
+            run_forever(agents, store, engine, executor, ig)
     finally:
         store.close()
         engine.close()
+        if ig:
+            ig.close()
         for a in agents:
             a.close()
 

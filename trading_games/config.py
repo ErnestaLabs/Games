@@ -64,6 +64,15 @@ KALSHI_EMAIL    = os.environ.get("KALSHI_EMAIL", "")
 KALSHI_PASSWORD = os.environ.get("KALSHI_PASSWORD", "")
 KALSHI_DEMO     = os.environ.get("KALSHI_DEMO", "false").lower() not in ("false", "0", "no")
 
+# ── IG Group (UK spread betting) ─────────────────────────────────────────────
+
+IG_API_KEY    = os.environ.get("IG_API_KEY", "")
+IG_USERNAME   = os.environ.get("IG_USERNAME", "")
+IG_PASSWORD   = os.environ.get("IG_PASSWORD", "")
+IG_ACCOUNT_ID = os.environ.get("IG_ACCOUNT_ID", "")
+IG_DEMO       = os.environ.get("IG_DEMO", "true").lower() not in ("false", "0", "no")
+IG_MAX_SIZE_PER_POINT = float(os.environ.get("IG_MAX_SIZE_PER_POINT", "1.0"))
+
 # ── Hyperliquid (HIP-4 arb) ───────────────────────────────────────────────────
 
 HYPERLIQUID_API_URL = os.environ.get(
