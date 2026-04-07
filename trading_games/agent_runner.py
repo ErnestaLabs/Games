@@ -215,6 +215,13 @@ def _process_agent(agent, market: dict) -> dict | None:
         signal = agent.analyze_market(market)
         if signal:
             signal["agent"] = agent.name
+            # Populate token_id from market tokens if agent didn't set it
+            if not signal.get("token_id") and market.get("tokens"):
+                side = signal.get("side", "YES").upper()
+                for tok in market["tokens"]:
+                    if tok.get("outcome", "").upper() == side:
+                        signal["token_id"] = tok.get("token_id", "")
+                        break
             signal.setdefault("token_id", "")
             signal.setdefault("tick_size", "0.01")
             signal.setdefault("min_order_size", 1.0)
