@@ -39,6 +39,9 @@ from polymarket.prediction_store import PredictionStore
 from polymarket.order_executor import OrderExecutor
 from trading_games.kalshi_executor import KalshiExecutor
 from trading_games.ig_executor import IGExecutor
+from trading_games.forage_signal_source import ForageSignalSource
+from trading_games.cross_venue_signal import CrossVenueSignalDetector
+from trading_games.ig_intelligence import IGIntelligence
 
 logging.basicConfig(
     level=logging.INFO,
@@ -236,21 +239,120 @@ def _process_agent(agent, market: dict) -> dict | None:
         return None
 
 
+def _execute_ig_from_market(
+    ig: "IGExecutor",
+    ts: "TradeSignal",
+    market: dict,
+    store: "PredictionStore",
+) -> bool:
+    """
+    Execute a signal on IG. If the market dict has a pre-mapped epic (_ig_epic),
+    use it directly. Otherwise fall back to keyword search.
+    Returns True if position was opened.
+    """
+    from trading_games.ig_epic_mapper import map_signal_to_epics
+
+    size_usdc = ts.kelly_size * 100.0
+    direction = market.get("_ig_direction") or ts.side
+    epic      = market.get("_ig_epic", "")
+
+    if not epic:
+        # Map via entity/question keywords
+        entity_name = market.get("entity_name", ts.question[:40])
+        entity_type = market.get("entity_type", "unknown")
+        signal_text = market.get("signal_text", ts.question)
+        mapped = map_signal_to_epics(entity_name, entity_type, signal_text, direction)
+        if mapped:
+            epic      = mapped[0]["epic"]
+            direction = mapped[0]["direction"]
+
+    if not epic:
+        return False
+
+    # Auto stop: 2% of a typical index level (e.g. FTSE 8000 × 0.02 = 160 pts)
+    # For forex: 200 pips. For commodities: 3% movement. All conservative.
+    stop_distance = float(os.environ.get("IG_STOP_DISTANCE", "0"))  # 0 = no stop (demo safe)
+
+    ig_result = ig.execute_from_signal(
+        question=ts.question,
+        side=direction,
+        size_usdc=size_usdc,
+        edge=ts.edge,
+        epic=epic,
+        stop_distance=stop_distance if stop_distance > 0 else None,
+    )
+    if ig_result.success:
+        store.record(ts, simulated_size_usdc=size_usdc)
+        logger.info(
+            "IG FILLED: [%s] %s %s | £%.2f/pt | epic=%s | deal=%s",
+            ts.agent, direction, ts.question[:40], size_usdc / 100, epic,
+            ig_result.deal_id or "demo",
+        )
+        return True
+    return False
+
+
 def scan_once(
     agents: list,
-    store: PredictionStore,
-    engine: ScoringEngine,
-    executor: OrderExecutor | None = None,
+    store: "PredictionStore",
+    engine: "ScoringEngine",
+    executor: "OrderExecutor | None" = None,
     ig: "IGExecutor | None" = None,
+    cross_venue: "CrossVenueSignalDetector | None" = None,
+    forage_source: "ForageSignalSource | None" = None,
+    ig_intel: "IGIntelligence | None" = None,
 ) -> int:
-    """One scan: fetch markets, run all agents, record signals, execute live orders."""
-    markets = fetch_markets()
+    """
+    One scan: fetch signal sources, run all agents, record and execute.
+
+    Signal priority for IG mode:
+      1. IG Intelligence: IG prices + calendar + news → pattern-detected ideas (highest quality)
+      2. Cross-venue divergence (PM vs Kalshi)
+      3. Forage entity signals — causal intelligence
+      4. Polymarket markets — baseline intel
+    """
+    # Build market list from all sources
+    markets: list[dict] = []
+
+    if ig:
+        # IG Intelligence: pattern-detected trade ideas from IG's own data firehose
+        if ig_intel:
+            try:
+                ideas = ig_intel.run_cycle()
+                markets.extend([idea.to_market_dict() for idea in ideas])
+                logger.info("[Scan] IG intelligence ideas: %d", len(ideas))
+            except Exception as exc:
+                logger.warning("[Scan] IG intel cycle failed: %s", exc)
+
+        # Cross-venue divergence (Polymarket vs Kalshi)
+        if cross_venue:
+            try:
+                cv_signals = cross_venue.detect()
+                markets.extend([s.to_market_dict() for s in cv_signals])
+                logger.info("[Scan] Cross-venue signals: %d", len(cv_signals))
+            except Exception as exc:
+                logger.warning("[Scan] Cross-venue detect failed: %s", exc)
+
+        if forage_source:
+            try:
+                fg_signals = forage_source.fetch_signals()
+                markets.extend(fg_signals)
+                logger.info("[Scan] Forage signals: %d", len(fg_signals))
+            except Exception as exc:
+                logger.warning("[Scan] Forage fetch failed: %s", exc)
+
+    # Always include Polymarket markets (intel + Polymarket execution fallback)
+    pm_markets = fetch_markets()
+    markets.extend(pm_markets)
+    logger.info("[Scan] Polymarket markets: %d | total input signals: %d",
+                len(pm_markets), len(markets))
+
     if not markets:
-        logger.warning("No markets fetched — check CLOB_HOST or network")
+        logger.warning("No markets/signals fetched — check network")
         return 0
 
-    logger.info("Scanning %d markets with %d agents [DRY_RUN=%s]...",
-                len(markets), len(agents), DRY_RUN)
+    logger.info("Scanning %d signals with %d agents [DRY_RUN=%s | IG=%s]...",
+                len(markets), len(agents), DRY_RUN, ig is not None)
     total_signals = 0
 
     for market in markets:
@@ -288,23 +390,14 @@ def scan_once(
 
                 acted = False
 
-                # IG spread betting (primary UK execution path)
+                # IG spread betting — primary UK execution path
                 if ig and ts.edge >= 0.05:
-                    size_usdc = ts.kelly_size * 100.0  # notional estimate
-                    ig_result = ig.execute_from_signal(
-                        question=ts.question,
-                        side=ts.side,
-                        size_usdc=size_usdc,
-                        edge=ts.edge,
-                    )
-                    if ig_result.success:
-                        store.record(ts, simulated_size_usdc=size_usdc)
+                    acted = _execute_ig_from_market(ig, ts, market, store)
+                    if acted:
                         total_signals += 1
-                        acted = True
 
                 if not acted:
                     if executor:
-                        # Polymarket (non-UK or future use)
                         result = executor.execute(ts)
                         if result.success:
                             store.record(ts, simulated_size_usdc=result.size_usdc)
@@ -350,10 +443,13 @@ def _generate_social_posts(agents: list, engine: ScoringEngine) -> None:
 
 def run_forever(
     agents: list,
-    store: PredictionStore,
-    engine: ScoringEngine,
-    executor: OrderExecutor | None = None,
+    store: "PredictionStore",
+    engine: "ScoringEngine",
+    executor: "OrderExecutor | None" = None,
     ig: "IGExecutor | None" = None,
+    cross_venue: "CrossVenueSignalDetector | None" = None,
+    forage_source: "ForageSignalSource | None" = None,
+    ig_intel: "IGIntelligence | None" = None,
 ) -> None:
     day_today = _day_index()
     last_score_ts = 0.0
@@ -365,7 +461,7 @@ def run_forever(
     while True:
         now_ts = time.time()
 
-        scan_once(agents, store, engine, executor, ig)
+        scan_once(agents, store, engine, executor, ig, cross_venue, forage_source, ig_intel)
 
         # Daily scoring at midnight UTC
         current_day = _day_index()
@@ -434,6 +530,20 @@ def main() -> None:
     else:
         logger.info("IG_API_KEY/IG_USERNAME/IG_PASSWORD not set — spread betting inactive")
 
+    # Cross-venue divergence detector (Polymarket vs Kalshi — read-only, no auth)
+    cross_venue = CrossVenueSignalDetector()
+    logger.info("Cross-venue signal detector active (PM vs Kalshi)")
+
+    # Forage Graph signal source
+    forage_source = ForageSignalSource()
+    logger.info("Forage signal source active | url=%s", forage_source._url)
+
+    # IG Intelligence: prices + calendar + news → pattern-detected trade ideas
+    ig_intel: IGIntelligence | None = None
+    if ig:
+        ig_intel = IGIntelligence(ig)
+        logger.info("IG Intelligence active — price/calendar/news pattern detection")
+
     agents  = [
         ArbitorAgent(),
         CausalProphetAgent(),
@@ -448,15 +558,19 @@ def main() -> None:
         if args.score:
             engine.print_standings()
         elif args.once:
-            scan_once(agents, store, engine, executor, ig)
+            scan_once(agents, store, engine, executor, ig, cross_venue, forage_source, ig_intel)
             engine.print_standings()
         else:
-            run_forever(agents, store, engine, executor, ig)
+            run_forever(agents, store, engine, executor, ig, cross_venue, forage_source, ig_intel)
     finally:
         store.close()
         engine.close()
         if ig:
             ig.close()
+        if ig_intel:
+            ig_intel.close()
+        cross_venue.close()
+        forage_source.close()
         for a in agents:
             a.close()
 

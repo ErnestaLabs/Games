@@ -72,6 +72,9 @@ IG_PASSWORD   = os.environ.get("IG_PASSWORD", "")
 IG_ACCOUNT_ID = os.environ.get("IG_ACCOUNT_ID", "")
 IG_DEMO       = os.environ.get("IG_DEMO", "true").lower() not in ("false", "0", "no")
 IG_MAX_SIZE_PER_POINT = float(os.environ.get("IG_MAX_SIZE_PER_POINT", "1.0"))
+IG_STOP_DISTANCE = float(os.environ.get("IG_STOP_DISTANCE", "0"))   # 0 = no auto-stop (set >0 in prod)
+DIVERGENCE_THRESHOLD = float(os.environ.get("DIVERGENCE_THRESHOLD", "0.04"))   # 4¢ PM/Kalshi gap
+BOND_THRESHOLD = float(os.environ.get("BOND_THRESHOLD", "0.97"))               # near-certain bond threshold
 
 # ── Hyperliquid (HIP-4 arb) ───────────────────────────────────────────────────
 

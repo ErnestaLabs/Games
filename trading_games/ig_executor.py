@@ -197,12 +197,14 @@ class IGExecutor:
     def execute_from_signal(
         self,
         question: str,
-        side: str,          # "YES"/"BUY" or "NO"/"SELL"
-        size_usdc: float,   # we'll map to £/point
+        side: str,              # "YES"/"BUY" or "NO"/"SELL"
+        size_usdc: float,       # we'll map to £/point
         edge: float = 0.0,
+        epic: str = "",         # pass directly to skip market search
+        stop_distance: float | None = None,   # points; None = auto (2% of level)
     ) -> IGResult:
         """
-        Find IG market for this question and place a spread bet.
+        Find IG market for this question and place a spread bet with stop-loss.
         Returns IGResult with success/failure details.
         """
         if not self._ensure_session():
@@ -212,39 +214,46 @@ class IGExecutor:
                 reason="IG session creation failed",
             )
 
-        # Search for matching market
-        markets = self.search_markets(question)
-        if not markets:
-            logger.info("IG: no market found for '%s'", question[:60])
-            return IGResult(
-                success=False, deal_id=None, epic="", description=question,
-                direction=side, size=0.0, level=0.0,
-                reason=f"No IG market found for: {question[:60]}",
-            )
+        # If epic not provided, search for matching market
+        if not epic:
+            markets = self.search_markets(question)
+            if not markets:
+                logger.info("IG: no market found for '%s'", question[:60])
+                return IGResult(
+                    success=False, deal_id=None, epic="", description=question,
+                    direction=side, size=0.0, level=0.0,
+                    reason=f"No IG market found for: {question[:60]}",
+                )
+            market = markets[0]
+            epic = market["epic"]
+            level = market.get("offer") if side.upper() in ("YES", "BUY") else market.get("bid")
+        else:
+            level = None  # will be filled from confirm
 
-        market = markets[0]
-        epic = market["epic"]
         direction = "BUY" if side.upper() in ("YES", "BUY") else "SELL"
 
         # Convert USDC notional to £/point (conservative: 1:1 mapping, capped)
         size_per_point = min(round(size_usdc / 100.0, 2), MAX_SIZE_PER_POINT)
         size_per_point = max(size_per_point, 0.50)  # IG min is typically £0.50/pt
 
-        level = market.get("offer") if direction == "BUY" else market.get("bid")
-
         logger.info(
-            "IG SPREAD BET: [%s] %s %s @ %s | £%.2f/pt | edge=%.1f%%",
-            epic, direction, question[:40], level, size_per_point, edge * 100,
+            "IG SPREAD BET: [%s] %s %s | £%.2f/pt | edge=%.1f%%",
+            epic, direction, question[:40], size_per_point, edge * 100,
         )
 
-        return self._place_otc(epic, direction, size_per_point, question)
+        return self._place_otc(epic, direction, size_per_point, question, stop_distance=stop_distance)
 
     def _place_otc(
-        self, epic: str, direction: str, size: float, description: str
+        self,
+        epic: str,
+        direction: str,
+        size: float,
+        description: str,
+        stop_distance: float | None = None,
     ) -> IGResult:
-        """Place OTC spreadbet position."""
+        """Place OTC spreadbet position with optional stop-loss."""
         try:
-            body = {
+            body: dict = {
                 "epic": epic,
                 "direction": direction,
                 "size": str(size),
@@ -252,7 +261,11 @@ class IGExecutor:
                 "expiry": "DFB",                # Daily Funded Bet
                 "guaranteedStop": False,
                 "forceOpen": True,
+                "currencyCode": "GBP",
             }
+            if stop_distance is not None and stop_distance > 0:
+                body["stopDistance"] = str(round(stop_distance, 2))
+                body["trailingStop"] = False
             resp = self._http.post(
                 f"{self._base}/positions/otc",
                 headers=self._headers(version="2"),
