@@ -56,6 +56,7 @@ class TradeSignal:
     min_order_size: float
     fee_schedule: dict
     signal_type: str            # "causal_upstream" | "regime_shift" | "signal_composite"
+    agent: str = ""
     detected_at: datetime = None
 
     def __post_init__(self):
