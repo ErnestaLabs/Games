@@ -496,6 +496,15 @@ def main() -> None:
     logger.info("Polymarket CLOB disabled (UK geoblocked) — execution via IG only | bankroll=$%.2f", bankroll)
 
     # Env-var diagnostic — logs presence (not values) of key secrets
+    logger.info(
+        "ENV DIAGNOSTIC | IG_API_KEY=%s IG_USERNAME=%s IG_PASSWORD=%s | STARTING_BANKROLL=%s",
+        "SET" if os.environ.get("IG_API_KEY") else "MISSING",
+        "SET" if os.environ.get("IG_USERNAME") else "MISSING",
+        "SET" if os.environ.get("IG_PASSWORD") else "MISSING",
+        os.environ.get("STARTING_BANKROLL", "NOT_SET"),
+    )
+
+    # Env-var diagnostic — logs presence (not values) of key secrets
     _ig_key_present  = bool(os.environ.get("IG_API_KEY"))
     _ig_user_present = bool(os.environ.get("IG_USERNAME"))
     _ig_pass_present = bool(os.environ.get("IG_PASSWORD"))
