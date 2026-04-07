@@ -10,3 +10,8 @@ restartPolicyMaxRetries = 5
 [environments.production.variables]
 PYTHONUNBUFFERED = "1"
 DRY_RUN = "false"
+STARTING_BANKROLL = "5.0"
+IG_MAX_SIZE_PER_POINT = "0.50"
+IG_STOP_DISTANCE = "20"
+DIVERGENCE_THRESHOLD = "0.04"
+BOND_THRESHOLD = "0.97"
