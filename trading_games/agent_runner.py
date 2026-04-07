@@ -28,6 +28,9 @@ from trading_games.config import (
     GAME_START_DATE, GAME_DAYS,
     KALSHI_API_KEY, KALSHI_EMAIL, KALSHI_PASSWORD,
     IG_API_KEY, IG_USERNAME, IG_PASSWORD, IG_ACCOUNT_ID, IG_DEMO,
+    MATCHBOOK_USERNAME, MATCHBOOK_PASSWORD,
+    SMARKETS_API_KEY,
+    FORAGE_GRAPH_URL, GRAPH_API_SECRET,
 )
 from trading_games.scoring_engine import ScoringEngine
 from trading_games.agents.arbitor       import ArbitorAgent
@@ -39,6 +42,8 @@ from polymarket.prediction_store import PredictionStore
 from polymarket.order_executor import OrderExecutor
 from trading_games.kalshi_executor import KalshiExecutor
 from trading_games.ig_executor import IGExecutor
+from trading_games.matchbook_executor import MatchbookExecutor
+from trading_games.smarkets_executor import SmarketsExecutor
 from trading_games.forage_signal_source import ForageSignalSource
 from trading_games.cross_venue_signal import CrossVenueSignalDetector
 from trading_games.ig_intelligence import IGIntelligence
@@ -254,6 +259,57 @@ def _execute_ig_from_market(
     return False
 
 
+def _push_trade_to_graph(venue: str, result: object, signal_context: dict) -> None:
+    """Push any executed trade from any venue to the Forage Graph as a Trade node."""
+    if not GRAPH_API_SECRET:
+        return
+    try:
+        node = {
+            "id":         f"trade_{venue}_{int(time.time()*1000)}",
+            "type":       "Trade",
+            "venue":      venue,
+            "success":    getattr(result, "success", False),
+            "direction":  getattr(result, "side", None) or getattr(result, "direction", ""),
+            "question":   signal_context.get("question", ""),
+            "agent":      signal_context.get("agent", ""),
+            "edge":       signal_context.get("edge", 0.0),
+            "confidence": signal_context.get("confidence", 0.0),
+            "source":     f"{venue}_executor",
+        }
+        # Venue-specific fields
+        if venue == "ig":
+            node.update({
+                "epic":    getattr(result, "epic", ""),
+                "deal_id": getattr(result, "deal_id", ""),
+                "size":    getattr(result, "size", 0.0),
+                "level":   getattr(result, "level", 0.0),
+            })
+        elif venue == "matchbook":
+            node.update({
+                "bet_id":       getattr(result, "bet_id", ""),
+                "event_name":   getattr(result, "event_name", ""),
+                "runner_name":  getattr(result, "runner_name", ""),
+                "odds":         getattr(result, "odds", 0.0),
+                "stake_gbp":    getattr(result, "stake", 0.0),
+            })
+        elif venue == "smarkets":
+            node.update({
+                "order_id":     getattr(result, "order_id", ""),
+                "event_name":   getattr(result, "event_name", ""),
+                "contract":     getattr(result, "contract_name", ""),
+                "price_bp":     getattr(result, "price_bp", 0),
+                "stake_gbp":    getattr(result, "stake_gbp", 0.0),
+            })
+        httpx.post(
+            f"{FORAGE_GRAPH_URL}/ingest/bulk",
+            headers={"Authorization": f"Bearer {GRAPH_API_SECRET}", "Content-Type": "application/json"},
+            json={"nodes": [node], "source": f"{venue}_trade"},
+            timeout=6.0,
+        )
+    except Exception as exc:
+        logger.debug("Graph trade push failed (%s): %s", venue, exc)
+
+
 def scan_once(
     agents: list,
     store: "PredictionStore",
@@ -263,6 +319,8 @@ def scan_once(
     cross_venue: "CrossVenueSignalDetector | None" = None,
     forage_source: "ForageSignalSource | None" = None,
     ig_intel: "IGIntelligence | None" = None,
+    matchbook: "MatchbookExecutor | None" = None,
+    smarkets: "SmarketsExecutor | None" = None,
 ) -> int:
     """
     One scan: fetch signal sources, run all agents, record and execute.
@@ -343,6 +401,13 @@ def scan_once(
                 epic=epic,
                 stop_distance=stop_distance,
             )
+            _push_trade_to_graph("ig", ig_result, {
+                "question": market.get("question", ""),
+                "agent": "direct_ig",
+                "edge": edge,
+                "confidence": confidence,
+                "market_id": market.get("market_id", ""),
+            })
             if ig_result.success:
                 total_signals += 1
                 logger.info(
@@ -387,24 +452,53 @@ def scan_once(
                     continue
 
                 acted = False
+                ctx = {
+                    "question":   ts.question,
+                    "agent":      ts.agent,
+                    "edge":       ts.edge,
+                    "confidence": ts.confidence,
+                    "market_id":  ts.market_id,
+                }
 
-                # IG spread betting — primary UK execution path
+                # IG spread betting — primary UK execution
                 if ig and ts.edge >= 0.05:
                     acted = _execute_ig_from_market(ig, ts, market, store)
                     if acted:
                         total_signals += 1
 
-                if not acted:
-                    # IG is the only live execution path — never fall back to
-                    # Polymarket CLOB (geoblocked in UK). Record as simulated.
-                    if executor and not ig:
-                        result = executor.execute(ts)
-                        if result.success:
-                            store.record(ts, simulated_size_usdc=result.size_usdc)
+                # Matchbook — UK prediction market exchange (YES/NO events)
+                if not acted and matchbook and ts.edge >= 0.05:
+                    try:
+                        mb_result = matchbook.execute_from_signal(
+                            question=ts.question, side=ts.side,
+                            size_usdc=ts.kelly_size * 100.0, edge=ts.edge,
+                        )
+                        _push_trade_to_graph("matchbook", mb_result, ctx)
+                        if mb_result.success:
+                            store.record(ts, simulated_size_usdc=mb_result.stake)
                             total_signals += 1
-                    else:
-                        store.record(ts, simulated_size_usdc=10.0)
-                        total_signals += 1
+                            acted = True
+                    except Exception as exc:
+                        logger.warning("Matchbook execute error: %s", exc)
+
+                # Smarkets — UK prediction market exchange
+                if not acted and smarkets and ts.edge >= 0.05:
+                    try:
+                        sm_result = smarkets.execute_from_signal(
+                            question=ts.question, side=ts.side,
+                            size_usdc=ts.kelly_size * 100.0, edge=ts.edge,
+                        )
+                        _push_trade_to_graph("smarkets", sm_result, ctx)
+                        if sm_result.success:
+                            store.record(ts, simulated_size_usdc=sm_result.stake_gbp)
+                            total_signals += 1
+                            acted = True
+                    except Exception as exc:
+                        logger.warning("Smarkets execute error: %s", exc)
+
+                if not acted:
+                    store.record(ts, simulated_size_usdc=10.0)
+                    total_signals += 1
 
     logger.info("Scan complete: %d signals acted on", total_signals)
     return total_signals
@@ -450,6 +544,8 @@ def run_forever(
     cross_venue: "CrossVenueSignalDetector | None" = None,
     forage_source: "ForageSignalSource | None" = None,
     ig_intel: "IGIntelligence | None" = None,
+    matchbook: "MatchbookExecutor | None" = None,
+    smarkets: "SmarketsExecutor | None" = None,
 ) -> None:
     day_today = _day_index()
     last_score_ts = 0.0
@@ -461,7 +557,7 @@ def run_forever(
     while True:
         now_ts = time.time()
 
-        scan_once(agents, store, engine, executor, ig, cross_venue, forage_source, ig_intel)
+        scan_once(agents, store, engine, executor, ig, cross_venue, forage_source, ig_intel, matchbook, smarkets)
 
         # Daily scoring at midnight UTC
         current_day = _day_index()
@@ -538,6 +634,26 @@ def main() -> None:
     else:
         logger.info("IG_API_KEY/IG_USERNAME/IG_PASSWORD not set — spread betting inactive")
 
+    # Matchbook — UK betting exchange (session-token auth)
+    matchbook: MatchbookExecutor | None = None
+    if MATCHBOOK_USERNAME and MATCHBOOK_PASSWORD:
+        matchbook = MatchbookExecutor(username=MATCHBOOK_USERNAME, password=MATCHBOOK_PASSWORD)
+        if matchbook.login():
+            logger.info("Matchbook exchange active | %s", matchbook.status_summary())
+        else:
+            logger.warning("Matchbook login failed — exchange disabled")
+            matchbook = None
+    else:
+        logger.info("MATCHBOOK_USERNAME/PASSWORD not set — Matchbook inactive")
+
+    # Smarkets — UK prediction market exchange (Bearer token auth)
+    smarkets: SmarketsExecutor | None = None
+    if SMARKETS_API_KEY:
+        smarkets = SmarketsExecutor(api_key=SMARKETS_API_KEY)
+        logger.info("Smarkets exchange active | %s", smarkets.status_summary())
+    else:
+        logger.info("SMARKETS_API_KEY not set — Smarkets inactive")
+
     # Cross-venue divergence detector (Polymarket vs Kalshi — read-only, no auth)
     cross_venue = CrossVenueSignalDetector()
     logger.info("Cross-venue signal detector active (PM vs Kalshi)")
@@ -566,10 +682,10 @@ def main() -> None:
         if args.score:
             engine.print_standings()
         elif args.once:
-            scan_once(agents, store, engine, executor, ig, cross_venue, forage_source, ig_intel)
+            scan_once(agents, store, engine, executor, ig, cross_venue, forage_source, ig_intel, matchbook, smarkets)
             engine.print_standings()
         else:
-            run_forever(agents, store, engine, executor, ig, cross_venue, forage_source, ig_intel)
+            run_forever(agents, store, engine, executor, ig, cross_venue, forage_source, ig_intel, matchbook, smarkets)
     finally:
         store.close()
         engine.close()
@@ -577,6 +693,10 @@ def main() -> None:
             ig.close()
         if ig_intel:
             ig_intel.close()
+        if matchbook:
+            matchbook.close()
+        if smarkets:
+            smarkets.close()
         cross_venue.close()
         forage_source.close()
         for a in agents:

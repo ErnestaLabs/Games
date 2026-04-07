@@ -76,6 +76,15 @@ IG_STOP_DISTANCE = float(os.environ.get("IG_STOP_DISTANCE", "0"))   # 0 = no aut
 DIVERGENCE_THRESHOLD = float(os.environ.get("DIVERGENCE_THRESHOLD", "0.04"))   # 4¢ PM/Kalshi gap
 BOND_THRESHOLD = float(os.environ.get("BOND_THRESHOLD", "0.97"))               # near-certain bond threshold
 
+# ── Matchbook (UK betting exchange) ──────────────────────────────────────────
+
+MATCHBOOK_USERNAME = os.environ.get("MATCHBOOK_USERNAME", "")
+MATCHBOOK_PASSWORD = os.environ.get("MATCHBOOK_PASSWORD", "")
+
+# ── Smarkets (UK prediction market exchange) ──────────────────────────────────
+
+SMARKETS_API_KEY = os.environ.get("SMARKETS_API_KEY", "")
+
 # ── Hyperliquid (HIP-4 arb) ───────────────────────────────────────────────────
 
 HYPERLIQUID_API_URL = os.environ.get(
