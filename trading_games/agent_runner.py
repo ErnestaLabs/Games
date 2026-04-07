@@ -47,6 +47,9 @@ from trading_games.smarkets_executor import SmarketsExecutor
 from trading_games.forage_signal_source import ForageSignalSource
 from trading_games.cross_venue_signal import CrossVenueSignalDetector
 from trading_games.ig_intelligence import IGIntelligence
+from trading_games.market_pulse_watcher import MarketPulseWatcher
+from trading_games.news_flow_watcher    import NewsFlowWatcher
+from trading_games.result_flow_watcher  import ResultFlowWatcher
 
 logging.basicConfig(
     level=logging.INFO,
@@ -654,6 +657,19 @@ def main() -> None:
     else:
         logger.info("SMARKETS_API_KEY not set — Smarkets inactive")
 
+    # ── Data flock — always-on background collectors ──────────────────────────
+    market_pulse = MarketPulseWatcher()
+    market_pulse.start()
+    logger.info("MarketPulse_Watcher started — IG/PM/Kalshi/Matchbook/Smarkets/Onchain collectors active")
+
+    news_flow = NewsFlowWatcher()
+    news_flow.start()
+    logger.info("NewsFlow_Watcher started — RSS feeds live")
+
+    result_flow = ResultFlowWatcher()
+    result_flow.start()
+    logger.info("ResultFlow_Watcher started — tracking market resolutions + closed positions")
+
     # Cross-venue divergence detector (Polymarket vs Kalshi — read-only, no auth)
     cross_venue = CrossVenueSignalDetector()
     logger.info("Cross-venue signal detector active (PM vs Kalshi)")
@@ -687,6 +703,9 @@ def main() -> None:
         else:
             run_forever(agents, store, engine, executor, ig, cross_venue, forage_source, ig_intel, matchbook, smarkets)
     finally:
+        market_pulse.stop()
+        news_flow.stop()
+        result_flow.stop()
         store.close()
         engine.close()
         if ig:
