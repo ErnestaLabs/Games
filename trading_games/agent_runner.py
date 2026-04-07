@@ -163,10 +163,32 @@ def _normalise_market(m: dict) -> dict:
 
 def fetch_markets(limit: int = MARKET_PAGE_SIZE) -> list[dict]:
     """
-    Fetch active, non-closed Polymarket markets ordered by volume (highest first).
-    Uses Gamma API for current market discovery; CLOB API as fallback.
-    Normalises all markets to a common token/price structure.
+    Fetch active Polymarket markets from the CLOB API (primary) — CLOB markets
+    always have token IDs so orders can be placed. Gamma is used as an
+    enrichment source to add price data where missing.
     """
+    clob_markets: list[dict] = []
+
+    # Primary: CLOB API (guaranteed to have token_ids)
+    try:
+        resp = httpx.get(
+            f"{CLOB_HOST}/markets",
+            params={"active": "true", "closed": "false", "limit": limit},
+            timeout=15.0,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            raw = data.get("data") or data.get("markets") or []
+            if raw:
+                clob_markets = [_normalise_market(m) for m in raw]
+                logger.info("Fetched %d markets from CLOB API", len(clob_markets))
+    except Exception as exc:
+        logger.warning("CLOB market fetch failed: %s", exc)
+
+    if clob_markets:
+        return clob_markets
+
+    # Fallback: Gamma API (may lack clobTokenIds — orders will be skipped)
     try:
         resp = httpx.get(
             "https://gamma-api.polymarket.com/markets",
@@ -177,23 +199,11 @@ def fetch_markets(limit: int = MARKET_PAGE_SIZE) -> list[dict]:
         if resp.status_code == 200:
             markets = resp.json()
             if isinstance(markets, list) and markets:
+                logger.warning("Falling back to Gamma API — token IDs may be missing")
                 return [_normalise_market(m) for m in markets]
     except Exception as exc:
         logger.debug("Gamma API failed: %s", exc)
 
-    # Fallback to CLOB API
-    try:
-        resp = httpx.get(
-            f"{CLOB_HOST}/markets",
-            params={"active": "true", "closed": "false", "limit": limit},
-            timeout=15.0,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            raw = data.get("data") or data.get("markets") or []
-            return [_normalise_market(m) for m in raw]
-    except Exception as exc:
-        logger.warning("Market fetch failed: %s", exc)
     return []
 
 
