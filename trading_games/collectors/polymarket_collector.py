@@ -118,19 +118,28 @@ class PolymarketCollector(BaseCollector):
         return []
 
     def _fetch_top_wallets(self) -> list[dict]:
-        """Fetch top earners leaderboard for smart-money copy signals."""
+        """Derive top wallets from recent high-volume trades (leaderboard endpoint gone)."""
         try:
             resp = self._http.get(
-                f"{DATA_API}/leaderboard",
-                params={"limit": WALLET_LIMIT},
+                f"{DATA_API}/trades",
+                params={"limit": 500, "taker_side": "BUY"},
                 timeout=10.0,
             )
             if resp.status_code == 200:
-                data = resp.json()
-                return data if isinstance(data, list) else (data.get("data") or [])
-            logger.warning("[polymarket] wallets fetch: %d", resp.status_code)
+                trades = resp.json()
+                if isinstance(trades, dict):
+                    trades = trades.get("data") or []
+                # Aggregate USDC volume per wallet, return top WALLET_LIMIT
+                vol: dict[str, float] = {}
+                for t in trades:
+                    addr = t.get("maker") or t.get("proxyWallet") or ""
+                    if addr:
+                        vol[addr] = vol.get(addr, 0) + float(t.get("usdcSize") or 0)
+                top = sorted(vol.items(), key=lambda x: -x[1])[:WALLET_LIMIT]
+                return [{"address": a, "volume": v} for a, v in top]
+            logger.debug("[polymarket] wallets fetch: %d", resp.status_code)
         except Exception as exc:
-            logger.warning("[polymarket] wallets fetch error: %s", exc)
+            logger.debug("[polymarket] wallets fetch error: %s", exc)
         return []
 
     @staticmethod

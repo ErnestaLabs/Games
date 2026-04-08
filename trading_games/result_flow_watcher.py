@@ -36,7 +36,7 @@ FORAGE_GRAPH_URL = os.environ.get("FORAGE_GRAPH_URL", "https://forage-graph-prod
 GRAPH_API_SECRET = os.environ.get("GRAPH_API_SECRET", "")
 
 GAMMA_API    = "https://gamma-api.polymarket.com"
-KALSHI_BASE  = "https://trading-api.kalshi.com/trade-api/v2"
+KALSHI_BASE  = "https://api.elections.kalshi.com/trade-api/v2"
 IG_BASE      = "https://api.ig.com/gateway/deal"
 
 IG_API_KEY    = os.environ.get("IG_API_KEY",    "")

@@ -79,14 +79,27 @@ class OnchainCollector(BaseCollector):
         return nodes
 
     def _fetch_leaderboard(self) -> list[dict]:
+        """Derive top traders from recent trades volume (leaderboard endpoint is gone)."""
         try:
-            resp = self._http.get(f"{DATA_API}/leaderboard", params={"limit": TOP_TRADERS_LIMIT}, timeout=10.0)
+            resp = self._http.get(
+                f"{DATA_API}/trades",
+                params={"limit": 500, "taker_side": "BUY"},
+                timeout=10.0,
+            )
             if resp.status_code == 200:
-                data = resp.json()
-                return data if isinstance(data, list) else (data.get("data") or [])
-            logger.debug("[onchain] leaderboard: %d", resp.status_code)
+                trades = resp.json()
+                if isinstance(trades, dict):
+                    trades = trades.get("data") or []
+                vol: dict[str, float] = {}
+                for t in trades:
+                    addr = t.get("maker") or t.get("proxyWallet") or ""
+                    if addr:
+                        vol[addr] = vol.get(addr, 0) + float(t.get("usdcSize") or 0)
+                top = sorted(vol.items(), key=lambda x: -x[1])[:TOP_TRADERS_LIMIT]
+                return [{"proxyWallet": a, "volume": v} for a, v in top]
+            logger.debug("[onchain] top traders: %d", resp.status_code)
         except Exception as exc:
-            logger.debug("[onchain] leaderboard error: %s", exc)
+            logger.debug("[onchain] top traders error: %s", exc)
         return []
 
     def _fetch_recent_trades(self) -> list[dict]:

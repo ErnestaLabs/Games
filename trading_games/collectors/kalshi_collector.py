@@ -18,7 +18,7 @@ from .base_collector import BaseCollector
 
 logger = logging.getLogger(__name__)
 
-KALSHI_BASE = "https://trading-api.kalshi.com/trade-api/v2"
+KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 
 KALSHI_LIMIT = int(os.environ.get("KALSHI_MARKET_LIMIT", "200"))
 

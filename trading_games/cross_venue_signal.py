@@ -35,7 +35,7 @@ DIVERGENCE_THRESHOLD = float(os.environ.get("DIVERGENCE_THRESHOLD", "0.04"))   #
 BOND_THRESHOLD       = float(os.environ.get("BOND_THRESHOLD", "0.97"))          # near-certain
 
 POLYMARKET_GAMMA  = "https://gamma-api.polymarket.com"
-KALSHI_BASE       = "https://trading-api.kalshi.com/trade-api/v2"
+KALSHI_BASE       = "https://api.elections.kalshi.com/trade-api/v2"
 POLYMARKET_DATA   = "https://data-api.polymarket.com"
 
 # Keywords that link a market topic to an IG instrument category + direction bias
