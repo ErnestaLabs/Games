@@ -50,6 +50,7 @@ from trading_games.ig_intelligence import IGIntelligence
 from trading_games.market_pulse_watcher import MarketPulseWatcher
 from trading_games.news_flow_watcher    import NewsFlowWatcher
 from trading_games.result_flow_watcher  import ResultFlowWatcher
+from trading_games.oracle               import Oracle
 
 logging.basicConfig(
     level=logging.INFO,
@@ -670,6 +671,11 @@ def main() -> None:
     result_flow.start()
     logger.info("ResultFlow_Watcher started — tracking market resolutions + closed positions")
 
+    # Oracle — meta-intelligence engine, reads everything and emits revelations
+    oracle = Oracle()
+    oracle.start()
+    logger.info("Oracle awakened — continuously synthesizing revelations every %ds", int(os.environ.get("ORACLE_INTERVAL", "300")))
+
     # Cross-venue divergence detector (Polymarket vs Kalshi — read-only, no auth)
     cross_venue = CrossVenueSignalDetector()
     logger.info("Cross-venue signal detector active (PM vs Kalshi)")
@@ -703,6 +709,7 @@ def main() -> None:
         else:
             run_forever(agents, store, engine, executor, ig, cross_venue, forage_source, ig_intel, matchbook, smarkets)
     finally:
+        oracle.stop()
         market_pulse.stop()
         news_flow.stop()
         result_flow.stop()
