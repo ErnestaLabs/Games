@@ -276,6 +276,10 @@ def scan_once(
     logger.info("Scan complete: %d signals acted on", total_signals)
 
     # Route signals to UK execution venues
+    if ig_exec is not None:
+        # Always run crypto momentum scanner — independent of Polymarket signals
+        ig_exec.scan_crypto_direct()
+
     if signals_list:
         if betfair_exec is not None:
             betfair_exec.scan_and_execute(signals_list)
@@ -353,7 +357,6 @@ def run_forever(
         current_day = _day_index()
         if current_day != day_today or (now_ts - last_score_ts) >= SCORING_INTERVAL_SECS:
             engine.score_and_publish(current_day)
-            _generate_social_posts(agents, engine)
             last_score_ts = now_ts
             day_today = current_day
 

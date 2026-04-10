@@ -140,6 +140,8 @@ class IGClient:
 
         self._authenticated: bool = False
         self._allowance_exceeded: bool = False
+        # Crypto momentum tracking: epic → last seen mid price
+        self._last_crypto_prices: dict[str, float] = {}
 
         self._http = httpx.Client(
             timeout=20.0,
@@ -551,6 +553,84 @@ class IGClient:
             "IG scan complete: %d order(s) executed (dry_run=%s).",
             len(executed), DRY_RUN,
         )
+        return executed
+
+    # ── Crypto momentum scanner (independent of Polymarket signals) ────────────
+
+    # Crypto epics only — subset of _EPIC_MAP
+    _CRYPTO_EPICS: list[tuple[str, str]] = [
+        ("CS.D.BITCOIN.TODAY.IP",  "BTC"),
+        ("CS.D.ETHUSD.TODAY.IP",   "ETH"),
+        ("CS.D.XRPUSD.TODAY.IP",   "XRP"),
+    ]
+
+    # Momentum threshold: trade if price moved >= 0.15% since last scan
+    _CRYPTO_MOMENTUM_PCT = float(os.environ.get("IG_CRYPTO_MOMENTUM_PCT", "0.0015"))
+    # Size in £ per point (minimum on IG crypto is typically £1/pt)
+    _CRYPTO_SIZE = float(os.environ.get("IG_CRYPTO_SIZE", "1.0"))
+
+    def scan_crypto_direct(self) -> list[dict]:
+        """
+        Independent crypto momentum scanner.
+
+        Every call:
+          1. Fetches current mid for BTC, ETH, XRP.
+          2. Compares to price from last call.
+          3. If price moved >= _CRYPTO_MOMENTUM_PCT, places a market order
+             in the direction of movement.
+          4. Updates stored prices for next comparison.
+
+        Returns list of order results (empty if no momentum or DRY_RUN skips).
+        Uses at most 3 get_prices API calls per scan — well within daily budget.
+        """
+        if self._allowance_exceeded:
+            return []
+
+        if not self.authenticate():
+            return []
+
+        executed = []
+        for epic, symbol in self._CRYPTO_EPICS:
+            if self._allowance_exceeded:
+                break
+
+            price_data = self.get_prices(epic)
+            if price_data is None:
+                continue
+
+            mid = price_data["mid"]
+            last = self._last_crypto_prices.get(epic)
+            self._last_crypto_prices[epic] = mid
+
+            if last is None or last == 0:
+                logger.info("IG crypto %s: first price captured at %.2f — awaiting next scan for momentum", symbol, mid)
+                continue
+
+            change_pct = (mid - last) / last
+            if abs(change_pct) < self._CRYPTO_MOMENTUM_PCT:
+                logger.info(
+                    "IG crypto %s: move=%.4f%% below threshold %.4f%% — no trade",
+                    symbol, change_pct * 100, self._CRYPTO_MOMENTUM_PCT * 100,
+                )
+                continue
+
+            direction = "BUY" if change_pct > 0 else "SELL"
+            logger.info(
+                "IG CRYPTO MOMENTUM: %s %s move=%.3f%% | last=%.2f now=%.2f | size=£%.1f/pt",
+                direction, symbol, change_pct * 100, last, mid, self._CRYPTO_SIZE,
+            )
+            result = self.place_order(epic, direction, self._CRYPTO_SIZE)
+            executed.append({
+                "epic": epic,
+                "symbol": symbol,
+                "direction": direction,
+                "change_pct": change_pct,
+                "last_price": last,
+                "current_price": mid,
+                "size": self._CRYPTO_SIZE,
+                "result": result,
+            })
+
         return executed
 
     def close(self) -> None:
