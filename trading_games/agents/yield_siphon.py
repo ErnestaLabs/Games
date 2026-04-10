@@ -24,6 +24,33 @@ logger = logging.getLogger(__name__)
 SIPHON_MIN_EDGE = float(os.environ.get("SIPHON_MIN_EDGE", "0.04"))   # 4% minimum
 SIPHON_NEAR_50_BAND = float(os.environ.get("SIPHON_NEAR_50_BAND", "0.08"))  # within ±8% of 0.50
 
+
+def _base_rate(question: str) -> float:
+    """
+    Historical base rate prior for this market category.
+    Anchors LLM probability estimates rather than letting it guess freely.
+    Sources: Polymarket historical resolution rates by category.
+    """
+    q = question.lower()
+    if any(w in q for w in ["election", "win", "elected", "president", "vote", "senator", "governor", "candidate", "primary", "poll"]):
+        return 0.45  # incumbents / favourites lose slightly more than market expects
+    if any(w in q for w in ["bitcoin", "btc", "ethereum", "eth", "crypto", "above", "below", "reach", "hit", "price", "usd"]):
+        return 0.50  # price prediction markets: near coin-flip historically
+    if any(w in q for w in ["fed", "federal reserve", "rate hike", "rate cut", "interest rate", "gdp", "recession", "inflation", "cpi"]):
+        return 0.40  # macro surprises slightly below 50% (status quo persists)
+    if any(w in q for w in ["ceasefire", "war", "conflict", "invasion", "attack", "troops", "military"]):
+        return 0.35  # conflict escalation events: below 50%
+    if any(w in q for w in ["pass", "bill", "legislation", "law", "congress", "senate", "vote on", "approved"]):
+        return 0.38  # legislation: stalls more often than passes
+    if any(w in q for w in ["super bowl", "championship", "finals", "nba", "nfl", "nhl", "world cup", "premier league"]):
+        return 0.50  # sports: treated as 50/50 without team data
+    if any(w in q for w in ["ipo", "acquire", "merger", "acquisition", "deal", "buyout"]):
+        return 0.42  # corporate events: slightly below 50%
+    if any(w in q for w in ["arrest", "indict", "charge", "convict", "guilty", "verdict"]):
+        return 0.38  # legal events: prosecution slightly below 50%
+    return 0.45  # default prior: slight lean toward NO (events don't happen)
+
+
 _SYSTEM = (
     "You are Yield Siphon, an AI agent in The Trading Games. "
     "You harvest yield from fee-free markets and near-50/50 opportunities on Polymarket. "
@@ -104,13 +131,14 @@ class YieldSiphonAgent(BaseAgent):
 
             # Fallback: ask LLM for probability estimate when Forage unavailable
             if graph_prob == 0.0:
+                base_rate = _base_rate(question)
                 llm_resp = self.think_medium(
                     _SYSTEM,
                     f"Prediction market: '{question}'\n"
                     f"Current YES price: {yes_price:.2f}\n"
-                    "What is your probability estimate for YES? "
-                    "Reply with ONLY a number between 0.0 and 1.0 (e.g. 0.58). "
-                    "Base it on general knowledge.",
+                    f"Historical base rate for this category: {base_rate:.0%}\n"
+                    "Start from the base rate and adjust only if you have specific knowledge. "
+                    "Reply with ONLY a number between 0.0 and 1.0 (e.g. 0.58).",
                     max_tokens=10,
                 )
                 try:

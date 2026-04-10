@@ -83,10 +83,17 @@ def _resolve_cert_paths() -> tuple[str, str]:
         tmp = Path(tempfile.gettempdir())
         cert_path = tmp / "betfair_client.crt"
         key_path  = tmp / "betfair_client.key"
-        cert_path.write_bytes(base64.b64decode(cert_b64))
-        key_path.write_bytes(base64.b64decode(key_b64))
-        logger.info("Betfair cert decoded from env vars → %s", tmp)
-        return str(cert_path), str(key_path)
+        try:
+            cert_path.write_bytes(base64.b64decode(cert_b64))
+            key_path.write_bytes(base64.b64decode(key_b64))
+            logger.info("Betfair cert decoded from env vars → %s", tmp)
+            return str(cert_path), str(key_path)
+        except Exception as exc:
+            logger.warning(
+                "Betfair base64 decode failed (BETFAIR_CERT_B64=%d chars, BETFAIR_KEY_B64=%d chars): %s — "
+                "falling through to file path resolution",
+                len(cert_b64), len(key_b64), exc,
+            )
 
     env_cert = os.environ.get("BETFAIR_CERT_PATH", "")
     if env_cert:
