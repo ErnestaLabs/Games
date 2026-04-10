@@ -47,7 +47,7 @@ _MIN_EDGE = 0.03  # 3% — spread must be at least this wide to justify entry
 
 # ── Hardcoded epic map ─────────────────────────────────────────────────────────
 # Format: (epic, human_label, category, keyword_list)
-# NEVER add dynamic search. These 7 epics are the ONLY instruments traded.
+# NEVER add dynamic search. These epics are the ONLY instruments traded.
 
 _EPIC_MAP: list[tuple[str, str, str, list[str]]] = [
     (
@@ -91,6 +91,25 @@ _EPIC_MAP: list[tuple[str, str, str, list[str]]] = [
         "Brent Crude (Physical) Daily",
         "oil_energy",
         ["oil", "opec", "energy", "barrel", "crude"],
+    ),
+    # ── Crypto ────────────────────────────────────────────────────────────────
+    (
+        "CS.D.BITCOIN.TODAY.IP",
+        "Bitcoin Daily",
+        "crypto",
+        ["bitcoin", "btc", "crypto", "cryptocurrency"],
+    ),
+    (
+        "CS.D.ETHUSD.TODAY.IP",
+        "Ethereum Daily",
+        "crypto",
+        ["ethereum", "eth", "ether", "crypto", "defi"],
+    ),
+    (
+        "CS.D.XRPUSD.TODAY.IP",
+        "XRP Daily",
+        "crypto",
+        ["xrp", "ripple", "crypto"],
     ),
 ]
 
