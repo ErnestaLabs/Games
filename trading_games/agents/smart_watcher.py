@@ -44,6 +44,10 @@ _wallet_cache: dict[str, dict] = {}
 _cache_ts: float = 0.0
 _CACHE_TTL = 3600  # 1 hour
 
+# Cache: wallet address → recent trades (short TTL — one fetch per scan cycle)
+_trades_cache: dict[str, tuple[float, list]] = {}
+_TRADES_CACHE_TTL = 120  # 2 minutes
+
 
 class SmartWatcherAgent(BaseAgent):
     name         = "smart_watcher"
@@ -71,7 +75,11 @@ class SmartWatcherAgent(BaseAgent):
         return list(_wallet_cache.values())
 
     def _get_recent_trades(self, wallet: str) -> list[dict]:
-        """Get recent trades for a wallet from Gamma data API (no auth required)."""
+        """Get recent trades for a wallet. Cached 2 min so we fetch once per scan, not per market."""
+        now = time.time()
+        cached = _trades_cache.get(wallet)
+        if cached and (now - cached[0]) < _TRADES_CACHE_TTL:
+            return cached[1]
         try:
             resp = httpx.get(
                 "https://data-api.polymarket.com/activity",
@@ -80,9 +88,12 @@ class SmartWatcherAgent(BaseAgent):
             )
             if resp.status_code == 200:
                 data = resp.json()
-                return data if isinstance(data, list) else (data.get("data") or [])
+                trades = data if isinstance(data, list) else (data.get("data") or [])
+                _trades_cache[wallet] = (now, trades)
+                return trades
         except Exception as exc:
             logger.debug("Trade fetch for %s failed: %s", wallet[:8], exc)
+        _trades_cache[wallet] = (now, [])
         return []
 
     def analyze_market(self, market: dict) -> Optional[dict]:

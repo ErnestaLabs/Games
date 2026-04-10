@@ -109,3 +109,20 @@ AGENT_MOLTLAUNCH_IDS: dict[str, str] = {
     "news_bolt":     "38636",   # $BOLT — news-driven rapid entry
     "smart_watcher": "38628",   # $WATCH — smart money copier (same as TheWatcherSees)
 }
+
+# ── Betfair Exchange (UK execution) ───────────────────────────────────────────
+
+BETFAIR_USERNAME   = os.environ.get("BETFAIR_USERNAME", "")
+BETFAIR_PASSWORD   = os.environ.get("BETFAIR_PASSWORD", "")
+BETFAIR_APP_KEY    = os.environ.get("BETFAIR_APP_KEY", "")
+# Path to Betfair SSL client certificate (required for non-interactive login)
+BETFAIR_CERT_PATH  = os.environ.get("BETFAIR_CERT_PATH", "")
+BETFAIR_KEY_PATH   = os.environ.get("BETFAIR_KEY_PATH", "")
+
+# ── IG Group (spread bet / CFD execution) ─────────────────────────────────────
+
+IG_API_KEY   = os.environ.get("IG_API_KEY", "")
+IG_USERNAME  = os.environ.get("IG_USERNAME", "")
+IG_PASSWORD  = os.environ.get("IG_PASSWORD", "")
+# "DEMO" or "LIVE" — defaults to demo until credentials are confirmed
+IG_ENV       = os.environ.get("IG_ENV", "DEMO")

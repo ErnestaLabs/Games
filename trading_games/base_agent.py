@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 
 _GRAPH_HEADERS = {"Authorization": f"Bearer {GRAPH_API_SECRET}"} if GRAPH_API_SECRET else {}
 
+# Circuit breaker: stop calling MCP after 3 consecutive 406/failures per process
+_mcp_fail_count: int = 0
+_MCP_FAIL_LIMIT: int = 3
+
 
 class BaseAgent(ABC):
     """
@@ -142,7 +146,8 @@ class BaseAgent(ABC):
 
     def forage_query(self, query: str) -> dict:
         """Query the Forage Knowledge Graph via MCP."""
-        if not APIFY_TOKEN:
+        global _mcp_fail_count
+        if not APIFY_TOKEN or _mcp_fail_count >= _MCP_FAIL_LIMIT:
             return {}
         try:
             resp = httpx.post(
@@ -150,6 +155,7 @@ class BaseAgent(ABC):
                 headers={
                     "Authorization": f"Bearer {APIFY_TOKEN}",
                     "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
                 },
                 json={
                     "jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -160,6 +166,10 @@ class BaseAgent(ABC):
                 },
                 timeout=20.0,
             )
+            if resp.status_code == 406:
+                _mcp_fail_count += 1
+                return {}
+            _mcp_fail_count = 0
             result = resp.json().get("result", {})
             return result if isinstance(result, dict) else {}
         except Exception as exc:
@@ -173,7 +183,8 @@ class BaseAgent(ABC):
         return self._forage_tool("get_causal_children", {"entity_id": entity_id})
 
     def _forage_tool(self, tool: str, args: dict) -> list:
-        if not APIFY_TOKEN:
+        global _mcp_fail_count
+        if not APIFY_TOKEN or _mcp_fail_count >= _MCP_FAIL_LIMIT:
             return []
         try:
             resp = httpx.post(
@@ -181,6 +192,7 @@ class BaseAgent(ABC):
                 headers={
                     "Authorization": f"Bearer {APIFY_TOKEN}",
                     "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
                 },
                 json={
                     "jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -188,6 +200,15 @@ class BaseAgent(ABC):
                 },
                 timeout=20.0,
             )
+            if resp.status_code == 406:
+                _mcp_fail_count += 1
+                if _mcp_fail_count >= _MCP_FAIL_LIMIT:
+                    logger.warning(
+                        "Forage MCP returning 406 — disabling for this session. "
+                        "Check FORAGE_ENDPOINT or Apify actor status."
+                    )
+                return []
+            _mcp_fail_count = 0  # reset on success
             result = resp.json().get("result", [])
             return result if isinstance(result, list) else []
         except Exception as exc:

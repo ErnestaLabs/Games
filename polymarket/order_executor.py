@@ -231,7 +231,8 @@ class OrderExecutor:
         try:
             from py_clob_client.clob_types import OrderArgs
 
-            clob_side = "BUY" if signal.side.upper() == "YES" else "SELL"
+            # Polymarket CLOB uses BUY/SELL, not YES/NO
+            clob_side = "BUY" if signal.side.upper() in ("YES", "BUY") else "SELL"
             order_args = OrderArgs(
                 token_id=signal.token_id,
                 price=price,

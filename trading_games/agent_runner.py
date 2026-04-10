@@ -22,15 +22,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, date
 
 import httpx
+from dotenv import load_dotenv
+
+# Load trading.env (clean KEY=VALUE file) from CWD (Forage_Landing root).
+# override=True ensures our values beat any stale vars already in the shell env.
+load_dotenv(dotenv_path=os.path.join(os.getcwd(), "trading.env"), override=True)
 
 from trading_games.config import (
-    DRY_RUN, STARTING_BANKROLL_USDC, SCORING_INTERVAL_SECS,
-    GAME_START_DATE, GAME_DAYS,
+    CLOB_HOST, DRY_RUN, STARTING_BANKROLL_USDC, SCORING_INTERVAL_SECS,
+    GAME_START_DATE, GAME_DAYS, POLYGON_PRIVATE_KEY,
     KALSHI_API_KEY, KALSHI_EMAIL, KALSHI_PASSWORD,
-    IG_API_KEY, IG_USERNAME, IG_PASSWORD, IG_ACCOUNT_ID, IG_DEMO,
-    MATCHBOOK_USERNAME, MATCHBOOK_PASSWORD,
-    SMARKETS_API_KEY,
-    FORAGE_GRAPH_URL, GRAPH_API_SECRET,
 )
 from trading_games.scoring_engine import ScoringEngine
 from trading_games.agents.arbitor       import ArbitorAgent
@@ -41,16 +42,13 @@ from trading_games.agents.smart_watcher import SmartWatcherAgent
 from polymarket.prediction_store import PredictionStore
 from polymarket.order_executor import OrderExecutor
 from trading_games.kalshi_executor import KalshiExecutor
-from trading_games.ig_executor import IGExecutor
-from trading_games.matchbook_executor import MatchbookExecutor
-from trading_games.smarkets_executor import SmarketsExecutor
-from trading_games.forage_signal_source import ForageSignalSource
-from trading_games.cross_venue_signal import CrossVenueSignalDetector
-from trading_games.ig_intelligence import IGIntelligence
-from trading_games.market_pulse_watcher import MarketPulseWatcher
-from trading_games.news_flow_watcher    import NewsFlowWatcher
-from trading_games.result_flow_watcher  import ResultFlowWatcher
-from trading_games.oracle               import Oracle
+
+try:
+    from trading_games.betfair_executor import BetfairExecutor
+    from trading_games.ig_executor import IGClient
+except ImportError:
+    BetfairExecutor = None  # type: ignore[assignment,misc]
+    IGClient = None  # type: ignore[assignment,misc]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -102,7 +100,7 @@ def _get_balance(clob_client) -> float:
         # USDC has 6 decimals on Polygon
         usdc = float(raw) / 1e6
         logger.info("Polygon wallet USDC balance: $%.2f", usdc)
-        return usdc if usdc > 0 else STARTING_BANKROLL_USDC
+        return usdc  # return real balance — 0.0 disables Polymarket executor
     except Exception as exc:
         logger.warning("Balance fetch failed (%s) — using $%.2f", exc, STARTING_BANKROLL_USDC)
         return STARTING_BANKROLL_USDC
@@ -135,17 +133,12 @@ def _normalise_market(m: dict) -> dict:
         except Exception:
             outcomes = ["Yes", "No"]
 
-    token_ids = m.get("clobTokenIds") or []
+    token_ids = m.get("clobTokenIds") or ["", ""]
     if isinstance(token_ids, str):
         try:
             token_ids = _json.loads(token_ids)
         except Exception:
             token_ids = []
-
-    # Token IDs are not needed for IG spread-bet execution (UK-only path)
-
-    if not token_ids:
-        token_ids = ["", ""]
 
     tokens = []
     for i, outcome in enumerate(outcomes):
@@ -162,10 +155,10 @@ def _normalise_market(m: dict) -> dict:
 
 def fetch_markets(limit: int = MARKET_PAGE_SIZE) -> list[dict]:
     """
-    Fetch active Polymarket markets from Gamma API (read-only intel feed).
-    CLOB API is not used — UK execution goes through IG spread betting only.
+    Fetch active, non-closed Polymarket markets ordered by volume (highest first).
+    Uses Gamma API for current market discovery; CLOB API as fallback.
+    Normalises all markets to a common token/price structure.
     """
-    # Gamma API — public, read-only, not geoblocked, no auth required
     try:
         resp = httpx.get(
             "https://gamma-api.polymarket.com/markets",
@@ -180,6 +173,19 @@ def fetch_markets(limit: int = MARKET_PAGE_SIZE) -> list[dict]:
     except Exception as exc:
         logger.debug("Gamma API failed: %s", exc)
 
+    # Fallback to CLOB API
+    try:
+        resp = httpx.get(
+            f"{CLOB_HOST}/markets",
+            params={"active": "true", "closed": "false", "limit": limit},
+            timeout=15.0,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            raw = data.get("data") or data.get("markets") or []
+            return [_normalise_market(m) for m in raw]
+    except Exception as exc:
+        logger.warning("Market fetch failed: %s", exc)
     return []
 
 
@@ -191,13 +197,6 @@ def _process_agent(agent, market: dict) -> dict | None:
         signal = agent.analyze_market(market)
         if signal:
             signal["agent"] = agent.name
-            # Populate token_id from market tokens if agent didn't set it
-            if not signal.get("token_id") and market.get("tokens"):
-                side = signal.get("side", "YES").upper()
-                for tok in market["tokens"]:
-                    if tok.get("outcome", "").upper() == side:
-                        signal["token_id"] = tok.get("token_id", "")
-                        break
             signal.setdefault("token_id", "")
             signal.setdefault("tick_size", "0.01")
             signal.setdefault("min_order_size", 1.0)
@@ -206,222 +205,29 @@ def _process_agent(agent, market: dict) -> dict | None:
             signal.setdefault("causal_triggers", [])
         return signal
     except Exception as exc:
-        logger.warning("[%s] analyze_market error: %s", agent.name, exc)
+        logger.debug("[%s] analyze_market error: %s", agent.name, exc)
         return None
-
-
-def _execute_ig_from_market(
-    ig: "IGExecutor",
-    ts: "TradeSignal",
-    market: dict,
-    store: "PredictionStore",
-) -> bool:
-    """
-    Execute a signal on IG. If the market dict has a pre-mapped epic (_ig_epic),
-    use it directly. Otherwise fall back to keyword search.
-    Returns True if position was opened.
-    """
-    from trading_games.ig_epic_mapper import map_signal_to_epics
-
-    size_usdc = ts.kelly_size * 100.0
-    direction = market.get("_ig_direction") or ts.side
-    epic      = market.get("_ig_epic", "")
-
-    if not epic:
-        # Map via entity/question keywords
-        entity_name = market.get("entity_name", ts.question[:40])
-        entity_type = market.get("entity_type", "unknown")
-        signal_text = market.get("signal_text", ts.question)
-        mapped = map_signal_to_epics(entity_name, entity_type, signal_text, direction)
-        if mapped:
-            epic      = mapped[0]["epic"]
-            direction = mapped[0]["direction"]
-
-    if not epic:
-        return False
-
-    # Auto stop: 2% of a typical index level (e.g. FTSE 8000 × 0.02 = 160 pts)
-    # For forex: 200 pips. For commodities: 3% movement. All conservative.
-    stop_distance = float(os.environ.get("IG_STOP_DISTANCE", "0"))  # 0 = no stop (demo safe)
-
-    ig_result = ig.execute_from_signal(
-        question=ts.question,
-        side=direction,
-        size_usdc=size_usdc,
-        edge=ts.edge,
-        epic=epic,
-        stop_distance=stop_distance if stop_distance > 0 else None,
-    )
-    if ig_result.success:
-        store.record(ts, simulated_size_usdc=size_usdc)
-        logger.info(
-            "IG FILLED: [%s] %s %s | £%.2f/pt | epic=%s | deal=%s",
-            ts.agent, direction, ts.question[:40], size_usdc / 100, epic,
-            ig_result.deal_id or "demo",
-        )
-        return True
-    return False
-
-
-def _push_trade_to_graph(venue: str, result: object, signal_context: dict) -> None:
-    """Push any executed trade from any venue to the Forage Graph as a Trade node."""
-    if not GRAPH_API_SECRET:
-        return
-    try:
-        node = {
-            "id":         f"trade_{venue}_{int(time.time()*1000)}",
-            "type":       "Trade",
-            "venue":      venue,
-            "success":    getattr(result, "success", False),
-            "direction":  getattr(result, "side", None) or getattr(result, "direction", ""),
-            "question":   signal_context.get("question", ""),
-            "agent":      signal_context.get("agent", ""),
-            "edge":       signal_context.get("edge", 0.0),
-            "confidence": signal_context.get("confidence", 0.0),
-            "source":     f"{venue}_executor",
-        }
-        # Venue-specific fields
-        if venue == "ig":
-            node.update({
-                "epic":    getattr(result, "epic", ""),
-                "deal_id": getattr(result, "deal_id", ""),
-                "size":    getattr(result, "size", 0.0),
-                "level":   getattr(result, "level", 0.0),
-            })
-        elif venue == "matchbook":
-            node.update({
-                "bet_id":       getattr(result, "bet_id", ""),
-                "event_name":   getattr(result, "event_name", ""),
-                "runner_name":  getattr(result, "runner_name", ""),
-                "odds":         getattr(result, "odds", 0.0),
-                "stake_gbp":    getattr(result, "stake", 0.0),
-            })
-        elif venue == "smarkets":
-            node.update({
-                "order_id":     getattr(result, "order_id", ""),
-                "event_name":   getattr(result, "event_name", ""),
-                "contract":     getattr(result, "contract_name", ""),
-                "price_bp":     getattr(result, "price_bp", 0),
-                "stake_gbp":    getattr(result, "stake_gbp", 0.0),
-            })
-        httpx.post(
-            f"{FORAGE_GRAPH_URL}/ingest/bulk",
-            headers={"Authorization": f"Bearer {GRAPH_API_SECRET}", "Content-Type": "application/json"},
-            json={"nodes": [node], "source": f"{venue}_trade"},
-            timeout=6.0,
-        )
-    except Exception as exc:
-        logger.debug("Graph trade push failed (%s): %s", venue, exc)
 
 
 def scan_once(
     agents: list,
-    store: "PredictionStore",
-    engine: "ScoringEngine",
-    executor: "OrderExecutor | None" = None,
-    ig: "IGExecutor | None" = None,
-    cross_venue: "CrossVenueSignalDetector | None" = None,
-    forage_source: "ForageSignalSource | None" = None,
-    ig_intel: "IGIntelligence | None" = None,
-    matchbook: "MatchbookExecutor | None" = None,
-    smarkets: "SmarketsExecutor | None" = None,
+    store: PredictionStore,
+    engine: ScoringEngine,
+    executor: OrderExecutor | None = None,
+    betfair_exec=None,
+    ig_exec=None,
 ) -> int:
-    """
-    One scan: fetch signal sources, run all agents, record and execute.
-
-    Signal priority for IG mode:
-      1. IG Intelligence: IG prices + calendar + news → pattern-detected ideas (highest quality)
-      2. Cross-venue divergence (PM vs Kalshi)
-      3. Forage entity signals — causal intelligence
-      4. Polymarket markets — baseline intel
-    """
-    # Build market list from all sources
-    markets: list[dict] = []
-
-    if ig:
-        # IG Intelligence: pattern-detected trade ideas from IG's own data firehose
-        if ig_intel:
-            try:
-                ideas = ig_intel.run_cycle()
-                markets.extend([idea.to_market_dict() for idea in ideas])
-                logger.info("[Scan] IG intelligence ideas: %d", len(ideas))
-            except Exception as exc:
-                logger.warning("[Scan] IG intel cycle failed: %s", exc)
-
-        # Cross-venue divergence (Polymarket vs Kalshi)
-        if cross_venue:
-            try:
-                cv_signals = cross_venue.detect()
-                markets.extend([s.to_market_dict() for s in cv_signals])
-                logger.info("[Scan] Cross-venue signals: %d", len(cv_signals))
-            except Exception as exc:
-                logger.warning("[Scan] Cross-venue detect failed: %s", exc)
-
-        if forage_source:
-            try:
-                fg_signals = forage_source.fetch_signals()
-                markets.extend(fg_signals)
-                logger.info("[Scan] Forage signals: %d", len(fg_signals))
-            except Exception as exc:
-                logger.warning("[Scan] Forage fetch failed: %s", exc)
-
-    # Always include Polymarket markets (intel + Polymarket execution fallback)
-    pm_markets = fetch_markets()
-    markets.extend(pm_markets)
-    logger.info("[Scan] Polymarket markets: %d | total input signals: %d",
-                len(pm_markets), len(markets))
-
+    """One scan: fetch markets, run all agents, record signals, execute live orders."""
+    markets = fetch_markets()
     if not markets:
-        logger.warning("No markets/signals fetched — check network")
+        logger.warning("No markets fetched — check CLOB_HOST or network")
         return 0
 
-    logger.info("Scanning %d signals with %d agents [DRY_RUN=%s | IG=%s]...",
-                len(markets), len(agents), DRY_RUN, ig is not None)
+    logger.info("Scanning %d markets with %d agents [DRY_RUN=%s]...",
+                len(markets), len(agents), DRY_RUN)
     total_signals = 0
+    signals_list = []
 
-    # ── Direct IG execution for pre-mapped signals ────────────────────────────
-    # IG Intelligence ideas and cross-venue signals already have epic + direction.
-    # Agents won't recognize these dicts, so execute them directly here.
-    if ig:
-        for market in markets:
-            epic = market.get("_ig_epic", "")
-            if not epic:
-                continue
-            confidence = float(market.get("confidence", 0))
-            if confidence < 0.55:
-                continue
-            edge = float(market.get("edge", confidence - 0.5))
-            if edge < 0.05:
-                continue
-            direction = market.get("_ig_direction", "BUY")
-            stop_distance = float(os.environ.get("IG_STOP_DISTANCE", "0")) or None
-            size_usdc = max(edge * 0.25 * 100.0, 0.50)   # Kelly-sized, min £0.50/pt equivalent
-
-            ig_result = ig.execute_from_signal(
-                question=market.get("question", "")[:120],
-                side=direction,
-                size_usdc=size_usdc,
-                edge=edge,
-                epic=epic,
-                stop_distance=stop_distance,
-            )
-            _push_trade_to_graph("ig", ig_result, {
-                "question": market.get("question", ""),
-                "agent": "direct_ig",
-                "edge": edge,
-                "confidence": confidence,
-                "market_id": market.get("market_id", ""),
-            })
-            if ig_result.success:
-                total_signals += 1
-                logger.info(
-                    "IG DIRECT: %s %s | confidence=%.0f%% | pattern=%s | deal=%s",
-                    direction, epic, confidence * 100,
-                    market.get("_signal_type", "?"),
-                    ig_result.deal_id or "demo",
-                )
-
-    # ── Agent-driven execution (Polymarket + Forage entity signals) ───────────
     for market in markets:
         with ThreadPoolExecutor(max_workers=5) as ex:
             futures = {ex.submit(_process_agent, agent, market): agent for agent in agents}
@@ -430,81 +236,46 @@ def scan_once(
                 if not signal:
                     continue
 
-                try:
-                    from polymarket.edge_calculator import TradeSignal
-                    ts = TradeSignal(
-                        market_id=signal["market_id"],
-                        question=signal["question"],
-                        side=signal.get("side", "YES"),
-                        token_id=signal.get("token_id", ""),
-                        tick_size=signal.get("tick_size", "0.01"),
-                        market_price=signal.get("market_price", 0.5),
-                        graph_prob=signal.get("graph_prob", 0.5),
-                        edge=signal.get("edge", 0.0),
-                        kelly_size=signal.get("edge", 0.0) * 0.25,
-                        min_order_size=signal.get("min_order_size", 1.0),
-                        signal_type=signal.get("signal_type", "composite"),
-                        causal_triggers=signal.get("causal_triggers", []),
-                        confidence=signal.get("confidence", 0.5),
-                        is_fee_free=signal.get("is_fee_free", False),
-                        fee_schedule=signal.get("fee_schedule", {"maker": 0.0, "taker": 0.02}),
-                        agent=signal.get("agent", ""),
-                    )
-                except Exception as ts_err:
-                    logger.warning("TradeSignal build failed for %s: %s | signal=%s",
-                                   signal.get("market_id","?")[:16], ts_err, list(signal.keys()))
-                    continue
+                from polymarket.edge_calculator import TradeSignal
+                ts = TradeSignal(
+                    market_id=signal["market_id"],
+                    question=signal["question"],
+                    side=signal.get("side", "YES"),
+                    token_id=signal.get("token_id", ""),
+                    tick_size=signal.get("tick_size", "0.01"),
+                    market_price=signal.get("market_price", 0.5),
+                    graph_prob=signal.get("graph_prob", 0.5),
+                    edge=signal.get("edge", 0.0),
+                    kelly_size=signal.get("edge", 0.0) * 0.25,
+                    min_order_size=signal.get("min_order_size", 1.0),
+                    signal_type=signal.get("signal_type", "composite"),
+                    causal_triggers=signal.get("causal_triggers", []),
+                    confidence=signal.get("confidence", 0.5),
+                    is_fee_free=signal.get("is_fee_free", False),
+                    fee_schedule=signal.get("fee_schedule", {}),
+                )
 
-                acted = False
-                ctx = {
-                    "question":   ts.question,
-                    "agent":      ts.agent,
-                    "edge":       ts.edge,
-                    "confidence": ts.confidence,
-                    "market_id":  ts.market_id,
-                }
-
-                # IG spread betting — primary UK execution
-                if ig and ts.edge >= 0.05:
-                    acted = _execute_ig_from_market(ig, ts, market, store)
-                    if acted:
-                        total_signals += 1
-
-                # Matchbook — UK prediction market exchange (YES/NO events)
-                if not acted and matchbook and ts.edge >= 0.05:
-                    try:
-                        mb_result = matchbook.execute_from_signal(
-                            question=ts.question, side=ts.side,
-                            size_usdc=ts.kelly_size * 100.0, edge=ts.edge,
-                        )
-                        _push_trade_to_graph("matchbook", mb_result, ctx)
-                        if mb_result.success:
-                            store.record(ts, simulated_size_usdc=mb_result.stake)
-                            total_signals += 1
-                            acted = True
-                    except Exception as exc:
-                        logger.warning("Matchbook execute error: %s", exc)
-
-                # Smarkets — UK prediction market exchange
-                if not acted and smarkets and ts.edge >= 0.05:
-                    try:
-                        sm_result = smarkets.execute_from_signal(
-                            question=ts.question, side=ts.side,
-                            size_usdc=ts.kelly_size * 100.0, edge=ts.edge,
-                        )
-                        _push_trade_to_graph("smarkets", sm_result, ctx)
-                        if sm_result.success:
-                            store.record(ts, simulated_size_usdc=sm_result.stake_gbp)
-                            total_signals += 1
-                            acted = True
-                    except Exception as exc:
-                        logger.warning("Smarkets execute error: %s", exc)
-
-                if not acted:
+                # Always record for scoring + UK venue routing
+                if executor:
+                    result = executor.execute(ts)
+                    size = result.size_usdc if result.success else 10.0
+                    store.record(ts, simulated_size_usdc=size)
+                else:
                     store.record(ts, simulated_size_usdc=10.0)
-                    total_signals += 1
+
+                # Route to IG + Betfair regardless of Polymarket result
+                total_signals += 1
+                signals_list.append(ts)
 
     logger.info("Scan complete: %d signals acted on", total_signals)
+
+    # Route signals to UK execution venues
+    if signals_list:
+        if betfair_exec is not None:
+            betfair_exec.scan_and_execute(signals_list)
+        if ig_exec is not None:
+            ig_exec.scan_and_execute(signals_list)
+
     return total_signals
 
 
@@ -541,15 +312,11 @@ def _generate_social_posts(agents: list, engine: ScoringEngine) -> None:
 
 def run_forever(
     agents: list,
-    store: "PredictionStore",
-    engine: "ScoringEngine",
-    executor: "OrderExecutor | None" = None,
-    ig: "IGExecutor | None" = None,
-    cross_venue: "CrossVenueSignalDetector | None" = None,
-    forage_source: "ForageSignalSource | None" = None,
-    ig_intel: "IGIntelligence | None" = None,
-    matchbook: "MatchbookExecutor | None" = None,
-    smarkets: "SmarketsExecutor | None" = None,
+    store: PredictionStore,
+    engine: ScoringEngine,
+    executor: OrderExecutor | None = None,
+    betfair_exec=None,
+    ig_exec=None,
 ) -> None:
     day_today = _day_index()
     last_score_ts = 0.0
@@ -561,7 +328,7 @@ def run_forever(
     while True:
         now_ts = time.time()
 
-        scan_once(agents, store, engine, executor, ig, cross_venue, forage_source, ig_intel, matchbook, smarkets)
+        scan_once(agents, store, engine, executor, betfair_exec=betfair_exec, ig_exec=ig_exec)
 
         # Daily scoring at midnight UTC
         current_day = _day_index()
@@ -589,106 +356,54 @@ def main() -> None:
     parser.add_argument("--score", action="store_true", help="Print standings and exit")
     args = parser.parse_args()
 
-    # UK execution is via IG spread betting — Polymarket CLOB is geoblocked.
-    # ClobClient is not initialised; executor is None (IG handles all live trades).
-    bankroll = STARTING_BANKROLL_USDC
-    executor = None
-    logger.info("Polymarket CLOB disabled (UK geoblocked) — execution via IG only | bankroll=$%.2f", bankroll)
+    # ── Wallet + ClobClient ───────────────────────────────────────────────
+    clob   = _build_clob_client()
+    bankroll = _get_balance(clob)
 
-    # Env-var diagnostic — logs presence (not values) of key secrets
-    logger.info(
-        "ENV DIAGNOSTIC | IG_API_KEY=%s IG_USERNAME=%s IG_PASSWORD=%s | STARTING_BANKROLL=%s",
-        "SET" if os.environ.get("IG_API_KEY") else "MISSING",
-        "SET" if os.environ.get("IG_USERNAME") else "MISSING",
-        "SET" if os.environ.get("IG_PASSWORD") else "MISSING",
-        os.environ.get("STARTING_BANKROLL", "NOT_SET"),
-    )
+    if not DRY_RUN:
+        if not POLYGON_PRIVATE_KEY:
+            logger.error("POLYGON_PRIVATE_KEY required for live trading. Set it in .env then rerun.")
+            return
+        logger.info("LIVE TRADING ACTIVE — bankroll=$%.2f USDC | wallet=%s",
+                    bankroll, (clob.get_address() if hasattr(clob, 'get_address') else "N/A"))
+    else:
+        logger.info("DRY_RUN=True — no real orders (set DRY_RUN=false to go live)")
 
-    # Env-var diagnostic — logs presence (not values) of key secrets
-    _ig_key_present  = bool(os.environ.get("IG_API_KEY"))
-    _ig_user_present = bool(os.environ.get("IG_USERNAME"))
-    _ig_pass_present = bool(os.environ.get("IG_PASSWORD"))
-    logger.info(
-        "ENV DIAGNOSTIC | IG_API_KEY=%s IG_USERNAME=%s IG_PASSWORD=%s | STARTING_BANKROLL=%s",
-        "SET" if _ig_key_present  else "MISSING",
-        "SET" if _ig_user_present else "MISSING",
-        "SET" if _ig_pass_present else "MISSING",
-        os.environ.get("STARTING_BANKROLL", "NOT_SET"),
-    )
+    # Only attempt Polymarket execution if wallet has funds.
+    # Signals always route to IG + Betfair regardless.
+    poly_balance = bankroll if POLYGON_PRIVATE_KEY else 0.0
+    if poly_balance > 1.0:
+        executor = OrderExecutor(
+            clob_client=clob,
+            initial_bankroll=bankroll,
+            dry_run=DRY_RUN,
+        )
+        logger.info("Polymarket executor active — $%.2f USDC", poly_balance)
+    else:
+        executor = None
+        logger.info("Polymarket wallet empty — execution via IG + Betfair only")
 
     # Kalshi — read-only price feed for divergence detection (no account needed)
     kalshi = KalshiExecutor()
     logger.info("Kalshi price feed active — monitoring for Poly/Kalshi divergences")
 
-    # IG Group — UK spread betting execution (live if IG_API_KEY set)
-    ig: IGExecutor | None = None
-    if IG_API_KEY and IG_USERNAME and IG_PASSWORD:
-        ig = IGExecutor(
-            api_key=IG_API_KEY,
-            username=IG_USERNAME,
-            password=IG_PASSWORD,
-            account_id=IG_ACCOUNT_ID,
-            demo=IG_DEMO,
-        )
-        if ig.login():
-            logger.info("IG spread betting active | demo=%s | %s", IG_DEMO, ig.status_summary())
+    # UK execution venues
+    betfair = BetfairExecutor() if BetfairExecutor is not None else None
+    ig = IGClient() if IGClient is not None else None
+    if betfair is not None:
+        if betfair._authenticated:
+            logger.info("Betfair Exchange connected — UK execution active")
         else:
-            logger.warning("IG login failed — spread betting disabled")
-            ig = None
+            logger.warning("Betfair not authenticated — check BETFAIR_USERNAME/PASSWORD/APP_KEY")
     else:
-        logger.info("IG_API_KEY/IG_USERNAME/IG_PASSWORD not set — spread betting inactive")
-
-    # Matchbook — UK betting exchange (session-token auth)
-    matchbook: MatchbookExecutor | None = None
-    if MATCHBOOK_USERNAME and MATCHBOOK_PASSWORD:
-        matchbook = MatchbookExecutor(username=MATCHBOOK_USERNAME, password=MATCHBOOK_PASSWORD)
-        if matchbook.login():
-            logger.info("Matchbook exchange active | %s", matchbook.status_summary())
+        logger.warning("BetfairExecutor not available — betfair_executor.py not yet installed")
+    if ig is not None:
+        if ig._authenticated:
+            logger.info("IG Group connected — spread bet execution active")
         else:
-            logger.warning("Matchbook login failed — exchange disabled")
-            matchbook = None
+            logger.warning("IG not authenticated — check IG_API_KEY/IG_USERNAME/IG_PASSWORD")
     else:
-        logger.info("MATCHBOOK_USERNAME/PASSWORD not set — Matchbook inactive")
-
-    # Smarkets — UK prediction market exchange (Bearer token auth)
-    smarkets: SmarketsExecutor | None = None
-    if SMARKETS_API_KEY:
-        smarkets = SmarketsExecutor(api_key=SMARKETS_API_KEY)
-        logger.info("Smarkets exchange active | %s", smarkets.status_summary())
-    else:
-        logger.info("SMARKETS_API_KEY not set — Smarkets inactive")
-
-    # ── Data flock — always-on background collectors ──────────────────────────
-    market_pulse = MarketPulseWatcher()
-    market_pulse.start()
-    logger.info("MarketPulse_Watcher started — IG/PM/Kalshi/Matchbook/Smarkets/Onchain collectors active")
-
-    news_flow = NewsFlowWatcher()
-    news_flow.start()
-    logger.info("NewsFlow_Watcher started — RSS feeds live")
-
-    result_flow = ResultFlowWatcher()
-    result_flow.start()
-    logger.info("ResultFlow_Watcher started — tracking market resolutions + closed positions")
-
-    # Oracle — meta-intelligence engine, reads everything and emits revelations
-    oracle = Oracle()
-    oracle.start()
-    logger.info("Oracle awakened — continuously synthesizing revelations every %ds", int(os.environ.get("ORACLE_INTERVAL", "300")))
-
-    # Cross-venue divergence detector (Polymarket vs Kalshi — read-only, no auth)
-    cross_venue = CrossVenueSignalDetector()
-    logger.info("Cross-venue signal detector active (PM vs Kalshi)")
-
-    # Forage Graph signal source
-    forage_source = ForageSignalSource()
-    logger.info("Forage signal source active | url=%s", forage_source._url)
-
-    # IG Intelligence: prices + calendar + news → pattern-detected trade ideas
-    ig_intel: IGIntelligence | None = None
-    if ig:
-        ig_intel = IGIntelligence(ig)
-        logger.info("IG Intelligence active — price/calendar/news pattern detection")
+        logger.warning("IGClient not available — ig_executor.py not yet installed")
 
     agents  = [
         ArbitorAgent(),
@@ -704,29 +419,21 @@ def main() -> None:
         if args.score:
             engine.print_standings()
         elif args.once:
-            scan_once(agents, store, engine, executor, ig, cross_venue, forage_source, ig_intel, matchbook, smarkets)
+            scan_once(agents, store, engine, executor,
+                      betfair_exec=betfair, ig_exec=ig)
             engine.print_standings()
         else:
-            run_forever(agents, store, engine, executor, ig, cross_venue, forage_source, ig_intel, matchbook, smarkets)
+            run_forever(agents, store, engine, executor,
+                        betfair_exec=betfair, ig_exec=ig)
     finally:
-        oracle.stop()
-        market_pulse.stop()
-        news_flow.stop()
-        result_flow.stop()
         store.close()
         engine.close()
-        if ig:
-            ig.close()
-        if ig_intel:
-            ig_intel.close()
-        if matchbook:
-            matchbook.close()
-        if smarkets:
-            smarkets.close()
-        cross_venue.close()
-        forage_source.close()
         for a in agents:
             a.close()
+        if betfair is not None:
+            betfair.close()
+        if ig is not None:
+            ig.close()
 
 
 if __name__ == "__main__":

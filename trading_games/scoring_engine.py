@@ -255,19 +255,19 @@ class ScoringEngine:
         """Pretty-print current standings to stdout."""
         rankings = self.rank_agents()
         from trading_games.config import GAME_DAYS
-        print(f"""
-╔══════════════════════════════════════════════════════════════╗
-║              THE TRADING GAMES — STANDINGS                   ║
-╠══════════════════════════════════════════════════════════════╣""")
-        medal = {1: "🥇", 2: "🥈", 3: "🥉"}
+        sep = "=" * 62
+        print(f"\n{sep}")
+        print(f"{'THE TRADING GAMES -- STANDINGS':^62}")
+        print(sep)
+        medal = {1: "[1]", 2: "[2]", 3: "[3]"}
         for row in rankings:
-            m = medal.get(row["rank"], f"#{row['rank']}")
+            m = medal.get(row["rank"], f"[{row['rank']}]")
             print(
-                f"║ {m} {row['display_name']:<20} {row['token']:<8} "
+                f"{m} {row['display_name']:<20} {row['token']:<8} "
                 f"score={row['score']:>+7.2f}  P&L=${row['simulated_pnl']:>+7.2f}  "
-                f"acc={row['accuracy']:.0%}  ║"
+                f"acc={row['accuracy']:.0%}"
             )
-        print("╚══════════════════════════════════════════════════════════════╝\n")
+        print(sep + "\n")
 
     def close(self) -> None:
         self._http.close()

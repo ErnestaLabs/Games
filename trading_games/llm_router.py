@@ -181,43 +181,35 @@ def llm(
     """
     cascade: list[tuple[str, callable]] = []
 
-    # OpenRouter model IDs per tier
-    OR_CRITICAL = "anthropic/claude-sonnet-4-6"
-    OR_HIGH     = "anthropic/claude-haiku-4-5"
-    OR_MEDIUM   = "google/gemini-2.0-flash-exp:free"
-    OR_LOW      = "deepseek/deepseek-chat"
-
-    # Model Fusion ensemble for critical decisions
-    FUSION_MODELS = [
-        "anthropic/claude-sonnet-4-6",
-        "openai/gpt-4.1",
-        "google/gemini-2.5-pro-preview",
-    ]
+    # Cheap, reliable OpenRouter models
+    OR_PRIMARY  = "deepseek/deepseek-chat"              # $0.14/M — primary for all tiers
+    OR_FALLBACK = "meta-llama/llama-3.3-70b-instruct"   # $0.12/M — fallback
+    OR_CRITICAL = "anthropic/claude-haiku-4-5"          # critical decisions only
 
     if priority == Priority.CRITICAL:
         cascade = [
-            ("fusion/claude+gpt+gemini",   lambda: _fusion(FUSION_MODELS, system, prompt, max_tokens)),
-            ("or/claude-sonnet-4-6",       lambda: _openrouter(OR_CRITICAL, system, prompt, max_tokens)),
-            ("claude-sonnet-4-6",          lambda: _claude(LLM_CRITICAL, system, prompt, max_tokens)),
-            ("or/claude-haiku-4-5",        lambda: _openrouter(OR_HIGH, system, prompt, max_tokens)),
+            ("or/deepseek-chat",           lambda: _openrouter(OR_PRIMARY, system, prompt, max_tokens)),
+            ("or/claude-haiku-4-5",        lambda: _openrouter(OR_CRITICAL, system, prompt, max_tokens)),
+            ("claude-haiku-4-5-20251001",  lambda: _claude(LLM_HIGH, system, prompt, max_tokens)),
+            ("or/llama-3.3-70b",           lambda: _openrouter(OR_FALLBACK, system, prompt, max_tokens)),
         ]
     elif priority == Priority.HIGH:
         cascade = [
-            ("or/claude-haiku-4-5",        lambda: _openrouter(OR_HIGH, system, prompt, max_tokens)),
-            ("claude-haiku-4-5-20251001",  lambda: _claude(LLM_HIGH, system, prompt, max_tokens)),
+            ("or/deepseek-chat",           lambda: _openrouter(OR_PRIMARY, system, prompt, max_tokens)),
+            ("or/llama-3.3-70b",           lambda: _openrouter(OR_FALLBACK, system, prompt, max_tokens)),
             ("deepseek-chat",              lambda: _deepseek(system, prompt, max_tokens)),
         ]
     elif priority == Priority.MEDIUM:
         cascade = [
-            ("or/gemini-flash",            lambda: _openrouter(OR_MEDIUM, system, prompt, max_tokens)),
-            ("moonshot-v1-8k",             lambda: _kimi(system, prompt, max_tokens)),
+            ("or/deepseek-chat",           lambda: _openrouter(OR_PRIMARY, system, prompt, max_tokens)),
+            ("or/llama-3.3-70b",           lambda: _openrouter(OR_FALLBACK, system, prompt, max_tokens)),
             ("deepseek-chat",              lambda: _deepseek(system, prompt, max_tokens)),
         ]
     else:  # LOW
         cascade = [
-            ("or/deepseek-chat",           lambda: _openrouter(OR_LOW, system, prompt, max_tokens)),
+            ("or/deepseek-chat",           lambda: _openrouter(OR_PRIMARY, system, prompt, max_tokens)),
+            ("or/llama-3.3-70b",           lambda: _openrouter(OR_FALLBACK, system, prompt, max_tokens)),
             ("deepseek-chat",              lambda: _deepseek(system, prompt, max_tokens)),
-            ("moonshot-v1-8k",             lambda: _kimi(system, prompt, max_tokens)),
         ]
 
     for model_name, call in cascade:

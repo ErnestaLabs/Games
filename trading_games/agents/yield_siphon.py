@@ -45,13 +45,16 @@ class YieldSiphonAgent(BaseAgent):
 
         tokens = market.get("tokens") or []
         yes_price = no_price = None
+        yes_token_id = no_token_id = ""
         for t in tokens:
             outcome = (t.get("outcome") or "").upper()
             price   = float(t.get("price") or 0.5)
             if outcome == "YES":
                 yes_price = price
+                yes_token_id = t.get("token_id") or ""
             elif outcome == "NO":
                 no_price = price
+                no_token_id = t.get("token_id") or ""
 
         if yes_price is None:
             return None
@@ -77,6 +80,7 @@ class YieldSiphonAgent(BaseAgent):
                         "market_id": market_id,
                         "question": question,
                         "side": side,
+                        "token_id": yes_token_id if side == "YES" else no_token_id,
                         "market_price": mkt_price,
                         "graph_prob": our_prob,
                         "edge": edge,
@@ -132,6 +136,7 @@ class YieldSiphonAgent(BaseAgent):
                 "market_id": market_id,
                 "question": question,
                 "side": side,
+                "token_id": yes_token_id if side == "YES" else no_token_id,
                 "market_price": yes_price if side == "YES" else (no_price or 1 - yes_price),
                 "graph_prob": graph_prob if side == "YES" else 1 - graph_prob,
                 "edge": edge,
