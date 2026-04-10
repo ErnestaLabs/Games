@@ -428,6 +428,9 @@ def main() -> None:
     if matchbook is not None:
         if matchbook._ensure_session():
             logger.info("Matchbook connected — UK exchange execution active")
+        elif matchbook._account_locked:
+            logger.warning("Matchbook account LOCKED — execution disabled (contact Matchbook support)")
+            matchbook = None  # don't pass it downstream, avoids per-signal noise
         else:
             logger.warning("Matchbook not authenticated — check MATCHBOOK_USERNAME/PASSWORD")
     else:

@@ -82,6 +82,7 @@ class MatchbookExecutor:
         self._http = httpx.Client(timeout=20.0)
         self._open_orders: dict[str, MatchbookOrder] = {}
         self._log: list[MatchbookResult] = []
+        self._account_locked: bool = False  # set True on 423 — stops all retries
 
     # ── Session ──────────────────────────────────────────────────────────────
 
@@ -93,6 +94,8 @@ class MatchbookExecutor:
 
     def login(self) -> bool:
         """Authenticate with username/password, store session token."""
+        if self._account_locked:
+            return False
         if not (self._username and self._password):
             logger.warning("MATCHBOOK_USERNAME/PASSWORD not set")
             return False
@@ -111,6 +114,13 @@ class MatchbookExecutor:
                     logger.info("Matchbook session created | user=%s", self._username)
                     return True
                 logger.error("Matchbook login: no session-token in response")
+            elif resp.status_code == 423:
+                # Account locked (Code 1301) — permanent error, stop retrying
+                self._account_locked = True
+                logger.warning(
+                    "Matchbook account LOCKED (423 Code 1301) — "
+                    "contact Matchbook support to unlock. All Matchbook execution disabled for this session."
+                )
             else:
                 logger.error("Matchbook login failed: %s %s", resp.status_code, resp.text[:200])
         except Exception as exc:
@@ -118,6 +128,8 @@ class MatchbookExecutor:
         return False
 
     def _ensure_session(self) -> bool:
+        if self._account_locked:
+            return False
         if self._session_token and time.time() < self._session_expires:
             return True
         return self.login()
