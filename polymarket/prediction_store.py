@@ -62,6 +62,7 @@ class PredictionStore:
             headers={"Authorization": f"Bearer {GRAPH_SECRET}"},
             timeout=10.0,
         )
+        self._graph_down = False  # circuit breaker: skip all graph calls after first 5xx
 
     def record(self, signal: TradeSignal, simulated_size_usdc: float) -> str:
         """
@@ -124,7 +125,7 @@ class PredictionStore:
 
     def _write_graph(self, record: dict) -> None:
         """POST to Forage Graph /claim as a PredictionRecord node."""
-        if not GRAPH_SECRET:
+        if not GRAPH_SECRET or self._graph_down:
             return
         try:
             payload = {
@@ -134,9 +135,14 @@ class PredictionStore:
             }
             resp = self._http.post(f"{GRAPH_URL}/claim", json=payload)
             if resp.status_code not in (200, 201):
-                logger.debug("Graph write failed (%d): %s", resp.status_code, resp.text[:100])
+                if resp.status_code >= 500:
+                    self._graph_down = True
+                    logger.warning("Forage Graph returned %d — disabling graph publish for this session", resp.status_code)
+                else:
+                    logger.debug("Graph write failed (%d): %s", resp.status_code, resp.text[:100])
         except Exception as exc:
-            logger.debug("Graph write error: %s", exc)
+            self._graph_down = True
+            logger.debug("Graph write error (disabling): %s", exc)
 
     def load_all(self) -> list[dict]:
         """Load all prediction records from local JSONL."""
@@ -173,7 +179,7 @@ class PredictionStore:
                 f.write(json.dumps(r) + "\n")
 
     def _patch_graph(self, prediction_id: str, outcome: str, pnl: float) -> None:
-        if not GRAPH_SECRET:
+        if not GRAPH_SECRET or self._graph_down:
             return
         try:
             self._http.patch(

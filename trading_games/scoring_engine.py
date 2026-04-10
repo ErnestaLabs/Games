@@ -48,6 +48,7 @@ class ScoringEngine:
     def __init__(self, agents: list[Any]) -> None:
         self._agents = agents
         self._http = httpx.Client(headers=_GRAPH_HEADERS, timeout=12.0)
+        self._graph_down = False  # circuit breaker: skip after first 5xx
 
     # ── Scoring ───────────────────────────────────────────────────────────
 
@@ -133,10 +134,10 @@ class ScoringEngine:
     # ── Graph publish ─────────────────────────────────────────────────────
 
     def _publish_to_graph(self, day: int, rankings: list[dict]) -> None:
-        if not GRAPH_API_SECRET:
+        if not GRAPH_API_SECRET or self._graph_down:
             return
         try:
-            self._http.post(
+            resp = self._http.post(
                 f"{FORAGE_GRAPH_URL}/claim",
                 json={
                     "type": "TradingGamesLeaderboard",
@@ -149,23 +150,26 @@ class ScoringEngine:
                     "source": "trading_games_scoring",
                 },
             )
+            if resp.status_code >= 500:
+                self._graph_down = True
+                logger.warning("Forage Graph %d — disabling graph publish for this session", resp.status_code)
+                return
             # Per-agent signals
             for row in rankings:
+                if self._graph_down:
+                    break
                 entity = f"agent:{row['agent']}"
-                self._http.post(
-                    f"{FORAGE_GRAPH_URL}/signal",
-                    json={"entity": entity, "metric": "rank", "value": row["rank"]},
-                )
-                self._http.post(
-                    f"{FORAGE_GRAPH_URL}/signal",
-                    json={"entity": entity, "metric": "score", "value": row["score"]},
-                )
-                self._http.post(
-                    f"{FORAGE_GRAPH_URL}/signal",
-                    json={"entity": entity, "metric": "pnl_usd", "value": row["simulated_pnl"]},
-                )
+                for metric, val in [("rank", row["rank"]), ("score", row["score"]), ("pnl_usd", row["simulated_pnl"])]:
+                    r = self._http.post(
+                        f"{FORAGE_GRAPH_URL}/signal",
+                        json={"entity": entity, "metric": metric, "value": val},
+                    )
+                    if r.status_code >= 500:
+                        self._graph_down = True
+                        break
         except Exception as exc:
-            logger.debug("Graph leaderboard publish failed: %s", exc)
+            self._graph_down = True
+            logger.debug("Graph leaderboard publish failed (disabling): %s", exc)
 
     # ── Moltbook publish ──────────────────────────────────────────────────
 
@@ -198,8 +202,7 @@ class ScoringEngine:
         return title, "\n".join(lines)
 
     def _publish_to_moltbook(self, day: int, rankings: list[dict]) -> None:
-        if not MOLTBOOK_FORAGEINTEL_KEY:
-            return
+        return  # disabled — Moltbook auth returns 403
         title, body = self._leaderboard_text(day, rankings)
         try:
             resp = httpx.post(
