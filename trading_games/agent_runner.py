@@ -50,6 +50,11 @@ except ImportError:
     BetfairExecutor = None  # type: ignore[assignment,misc]
     IGClient = None  # type: ignore[assignment,misc]
 
+try:
+    from trading_games.matchbook_executor import MatchbookExecutor
+except ImportError:
+    MatchbookExecutor = None  # type: ignore[assignment,misc]
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -216,6 +221,7 @@ def scan_once(
     executor: OrderExecutor | None = None,
     betfair_exec=None,
     ig_exec=None,
+    matchbook_exec=None,
 ) -> int:
     """One scan: fetch markets, run all agents, record signals, execute live orders."""
     markets = fetch_markets()
@@ -263,7 +269,7 @@ def scan_once(
                 else:
                     store.record(ts, simulated_size_usdc=10.0)
 
-                # Route to IG + Betfair regardless of Polymarket result
+                # Route to UK/EU execution venues regardless of Polymarket result
                 total_signals += 1
                 signals_list.append(ts)
 
@@ -275,6 +281,17 @@ def scan_once(
             betfair_exec.scan_and_execute(signals_list)
         if ig_exec is not None:
             ig_exec.scan_and_execute(signals_list)
+        if matchbook_exec is not None:
+            for ts in signals_list:
+                try:
+                    matchbook_exec.execute_from_signal(
+                        question=ts.question,
+                        side=ts.side,
+                        size_usdc=max(2.0, ts.kelly_size * 20.0),  # min £2
+                        edge=ts.edge,
+                    )
+                except Exception as exc:
+                    logger.debug("Matchbook execute error: %s", exc)
 
     return total_signals
 
@@ -317,6 +334,7 @@ def run_forever(
     executor: OrderExecutor | None = None,
     betfair_exec=None,
     ig_exec=None,
+    matchbook_exec=None,
 ) -> None:
     day_today = _day_index()
     last_score_ts = 0.0
@@ -328,7 +346,8 @@ def run_forever(
     while True:
         now_ts = time.time()
 
-        scan_once(agents, store, engine, executor, betfair_exec=betfair_exec, ig_exec=ig_exec)
+        scan_once(agents, store, engine, executor,
+                  betfair_exec=betfair_exec, ig_exec=ig_exec, matchbook_exec=matchbook_exec)
 
         # Daily scoring at midnight UTC
         current_day = _day_index()
@@ -390,6 +409,8 @@ def main() -> None:
     # UK execution venues
     betfair = BetfairExecutor() if BetfairExecutor is not None else None
     ig = IGClient() if IGClient is not None else None
+    matchbook = MatchbookExecutor() if MatchbookExecutor is not None else None
+
     if betfair is not None:
         if betfair._authenticated:
             logger.info("Betfair Exchange connected — UK execution active")
@@ -404,6 +425,13 @@ def main() -> None:
             logger.warning("IG not authenticated — check IG_API_KEY/IG_USERNAME/IG_PASSWORD")
     else:
         logger.warning("IGClient not available — ig_executor.py not yet installed")
+    if matchbook is not None:
+        if matchbook._ensure_session():
+            logger.info("Matchbook connected — UK exchange execution active")
+        else:
+            logger.warning("Matchbook not authenticated — check MATCHBOOK_USERNAME/PASSWORD")
+    else:
+        logger.warning("MatchbookExecutor not available")
 
     agents  = [
         ArbitorAgent(),
@@ -420,11 +448,11 @@ def main() -> None:
             engine.print_standings()
         elif args.once:
             scan_once(agents, store, engine, executor,
-                      betfair_exec=betfair, ig_exec=ig)
+                      betfair_exec=betfair, ig_exec=ig, matchbook_exec=matchbook)
             engine.print_standings()
         else:
             run_forever(agents, store, engine, executor,
-                        betfair_exec=betfair, ig_exec=ig)
+                        betfair_exec=betfair, ig_exec=ig, matchbook_exec=matchbook)
     finally:
         store.close()
         engine.close()
@@ -434,6 +462,8 @@ def main() -> None:
             betfair.close()
         if ig is not None:
             ig.close()
+        if matchbook is not None:
+            matchbook.close()
 
 
 if __name__ == "__main__":
