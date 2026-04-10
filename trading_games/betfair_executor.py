@@ -68,12 +68,23 @@ def _resolve_cert_paths() -> tuple[str, str]:
     Return (cert_path, key_path) for Betfair TLS client auth.
 
     Resolution order:
-    1. BETFAIR_CERT_PATH env var (expected to contain the .crt path; key must
-       sit alongside with the same stem and .key extension).
-    2. Relative to this file: ../../../Forage_Landing/betfair_client.{crt,key}
-       (i.e. trading_games_deploy/../Forage_Landing/ which resolves to
-       Forage_Landing inside the same OneDrive parent).
+    1. BETFAIR_CERT_B64 + BETFAIR_KEY_B64 env vars — base64-encoded cert/key,
+       decoded to temp files. Used on Railway/Docker where no filesystem certs exist.
+    2. BETFAIR_CERT_PATH env var — explicit file path.
+    3. Canonical local path: ../../../Forage_Landing/betfair_client.{crt,key}
     """
+    import base64, tempfile
+
+    cert_b64 = os.environ.get("BETFAIR_CERT_B64", "")
+    key_b64  = os.environ.get("BETFAIR_KEY_B64",  "")
+    if cert_b64 and key_b64:
+        tmp = Path(tempfile.gettempdir())
+        cert_path = tmp / "betfair_client.crt"
+        key_path  = tmp / "betfair_client.key"
+        cert_path.write_bytes(base64.b64decode(cert_b64))
+        key_path.write_bytes(base64.b64decode(key_b64))
+        return str(cert_path), str(key_path)
+
     env_cert = os.environ.get("BETFAIR_CERT_PATH", "")
     if env_cert:
         cert_path = Path(env_cert)

@@ -3,7 +3,7 @@ dockerfilePath = "trading_games/Dockerfile"
 
 [deploy]
 startCommand = "python -m trading_games.agent_runner"
-region = "asia-southeast1"
+region = "eu-west-1"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 5
 
