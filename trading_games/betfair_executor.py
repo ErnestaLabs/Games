@@ -77,7 +77,43 @@ def _resolve_cert_paths() -> tuple[str, str]:
 
     # Strip all whitespace — Railway multi-line env vars embed spaces/newlines/tabs
     cert_b64 = "".join(os.environ.get("BETFAIR_CERT_B64", "").split())
-    key_b64  = "".join(os.environ.get("BETFAIR_KEY_B64",  "").split())
+
+    # Primary lookup for the key
+    key_b64 = "".join(os.environ.get("BETFAIR_KEY_B64", "").split())
+
+    # Fallback 1: Railway may store the variable as "BETFAIR_KEY_B64 " (trailing space)
+    # if the name was pasted with a trailing space before the equals sign.
+    if not key_b64:
+        key_b64 = "".join(os.environ.get("BETFAIR_KEY_B64 ", "").split())
+        if key_b64:
+            logger.warning(
+                "BETFAIR_KEY_B64 resolved via trailing-space fallback "
+                '("BETFAIR_KEY_B64 ") — fix the Railway env var name to remove the space'
+            )
+
+    # Fallback 2: scan all env keys for any variation of BETFAIR_KEY_B64
+    # (handles leading/trailing whitespace or unexpected capitalisation)
+    if not key_b64:
+        for env_key, env_val in os.environ.items():
+            if env_key.strip().upper() == "BETFAIR_KEY_B64" and env_key != "BETFAIR_KEY_B64":
+                key_b64 = "".join(env_val.split())
+                if key_b64:
+                    logger.warning(
+                        "BETFAIR_KEY_B64 resolved via fuzzy env-key scan "
+                        "(actual key stored as %r) — fix the Railway env var name",
+                        env_key,
+                    )
+                    break
+
+    # Diagnostic: log every env key that contains "BETFAIR" so we can see
+    # exactly what Railway has stored (helpful for debugging name corruption).
+    betfair_keys = {k: len("".join(v.split())) for k, v in os.environ.items()
+                    if "BETFAIR" in k.upper()}
+    logger.info(
+        "Betfair env keys present: %s",
+        ", ".join(f"{k!r}={n}chars" for k, n in sorted(betfair_keys.items())),
+    )
+
     logger.info("Betfair cert resolution: BETFAIR_CERT_B64=%d chars, BETFAIR_KEY_B64=%d chars",
                 len(cert_b64), len(key_b64))
     if cert_b64 and key_b64:
