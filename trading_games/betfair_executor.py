@@ -171,16 +171,17 @@ class BetfairExecutor:
         self._cert_path = cert_path
         self._key_path  = key_path
 
-        # Optional HTTP proxy to route around datacenter IP geo-blocks.
-        # Set BETFAIR_PROXY=http://user:pass@host:port on Railway.
-        # A UK residential proxy (Oxylabs, Brightdata, etc.) fixes BETTING_RESTRICTED_LOCATION.
+        # Optional HTTP proxy — used ONLY for betting API calls (geo-blocked on Railway).
+        # Auth endpoints (identitysso.betfair.com) are accessible directly; routing
+        # them through the proxy breaks HTTPS CONNECT tunneling with a 404 error.
         self._proxy = os.environ.get("BETFAIR_PROXY", "").strip() or None
         if self._proxy:
-            logger.info("Betfair: routing via proxy %s", self._proxy.split("@")[-1])
+            logger.info("Betfair: betting API routed via proxy %s (auth is direct)",
+                        self._proxy.split("@")[-1])
 
-        # httpx client reused across calls (no cert attached here — cert only
-        # needed for the initial certlogin call, which uses its own short-lived
-        # client).
+        # Auth client: NO proxy — identitysso.betfair.com is reachable from Railway directly.
+        self._auth_http = httpx.Client(timeout=20.0)
+        # Betting API client: proxy applied here to bypass BETTING_RESTRICTED_LOCATION.
         proxy_args = {"proxy": self._proxy} if self._proxy else {}
         self._http = httpx.Client(timeout=20.0, **proxy_args)
 
@@ -265,7 +266,7 @@ class BetfairExecutor:
         Returns True on success and stores session token.
         """
         try:
-            resp = self._http.post(
+            resp = self._auth_http.post(
                 _INTERACTIVE_URL,
                 data={
                     "username": self._username,
@@ -782,7 +783,7 @@ class BetfairExecutor:
         """Log out of the current Betfair session and close the HTTP client."""
         if self._session_token:
             try:
-                self._http.get(
+                self._auth_http.get(
                     "https://identitysso.betfair.com/api/logout",
                     headers={
                         "X-Authentication": self._session_token,
@@ -799,5 +800,9 @@ class BetfairExecutor:
 
         try:
             self._http.close()
+        except Exception:
+            pass
+        try:
+            self._auth_http.close()
         except Exception:
             pass
