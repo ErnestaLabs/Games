@@ -21,7 +21,7 @@ from trading_games.base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
 
-SIPHON_MIN_EDGE = float(os.environ.get("SIPHON_MIN_EDGE", "0.04"))   # 4% minimum
+SIPHON_MIN_EDGE = float(os.environ.get("SIPHON_MIN_EDGE", "0.02"))   # 2% minimum — paper shows median arb profit ~60c/$ so market is highly inefficient
 SIPHON_NEAR_50_BAND = float(os.environ.get("SIPHON_NEAR_50_BAND", "0.08"))  # within ±8% of 0.50
 
 
@@ -48,7 +48,7 @@ def _base_rate(question: str) -> float:
         return 0.42  # corporate events: slightly below 50%
     if any(w in q for w in ["arrest", "indict", "charge", "convict", "guilty", "verdict"]):
         return 0.38  # legal events: prosecution slightly below 50%
-    return 0.45  # default prior: slight lean toward NO (events don't happen)
+    return 0.42  # default prior: lean NO — paper confirms YES systematically overpriced on Polymarket ($17M NO vs $11M YES extracted)
 
 
 _SYSTEM = (
