@@ -1,0 +1,19 @@
+app = "trading-games"
+primary_region = "dub"
+
+[build]
+  dockerfile = "trading_games/Dockerfile"
+
+[env]
+  PYTHONUNBUFFERED = "1"
+  DRY_RUN = "false"
+  STARTING_BANKROLL = "5.0"
+  IG_MAX_SIZE_PER_POINT = "0.50"
+  IG_STOP_DISTANCE = "20"
+  DIVERGENCE_THRESHOLD = "0.04"
+  BOND_THRESHOLD = "0.97"
+
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1
