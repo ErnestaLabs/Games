@@ -47,6 +47,17 @@ DATA_DIR = Path(__file__).parent / "data"
 PREDICTIONS_FILE = DATA_DIR / "predictions.jsonl"
 
 
+def _env(key: str, default: str = "") -> str:
+    """Get env var with fallback for Railway trailing/leading-space key bug."""
+    val = os.environ.get(key)
+    if val is not None:
+        return val
+    for k, v in os.environ.items():
+        if k.strip() == key:
+            return v
+    return default
+
+
 def _ensure_data_dir() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -63,6 +74,9 @@ class PredictionStore:
             timeout=10.0,
         )
         self._graph_down = False  # circuit breaker: skip all graph calls after first 5xx
+        logger.info("PredictionStore: DRY_RUN=%r SIMULATE_SCORES=%r",
+                    _env("DRY_RUN", "true"),
+                    _env("SIMULATE_SCORES", "<not set>"))
 
     def record(self, signal: TradeSignal, simulated_size_usdc: float) -> str:
         """
@@ -95,8 +109,8 @@ class PredictionStore:
         # In dry-run mode, simulate outcome immediately for feedback.
         # SIMULATE_SCORES=true forces simulation even in live mode (for leaderboard visibility).
         # In live mode with neither flag, outcome stays null until market resolves.
-        _dry = os.environ.get("DRY_RUN", "true").lower() not in ("false", "0", "no")
-        _sim = os.environ.get("SIMULATE_SCORES", "false").lower() in ("true", "1", "yes")
+        _dry = _env("DRY_RUN", "true").strip().lower() not in ("false", "0", "no")
+        _sim = _env("SIMULATE_SCORES", "false").strip().lower() in ("true", "1", "yes")
         if _dry or _sim:
             win_prob = max(0.05, min(0.95, signal.graph_prob))
             won = random.random() < win_prob
