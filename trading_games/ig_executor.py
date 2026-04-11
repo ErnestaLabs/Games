@@ -359,7 +359,7 @@ class IGClient:
         stop_distance = float(os.environ.get("IG_STOP_DISTANCE", "0") or 0)
         limit_distance = float(os.environ.get("IG_LIMIT_DISTANCE", "0") or 0)
 
-        payload = {
+        payload: dict = {
             "epic": epic,
             "direction": direction,
             "size": size,
@@ -368,11 +368,11 @@ class IGClient:
             "expiry": "-",
             "forceOpen": False,
             "guaranteedStop": False,
-            "stopDistance": stop_distance if stop_distance > 0 else None,
-            "limitDistance": limit_distance if limit_distance > 0 else None,
-            "stopLevel": None,
-            "limitLevel": None,
         }
+        if stop_distance > 0:
+            payload["stopDistance"] = stop_distance
+        if limit_distance > 0:
+            payload["limitDistance"] = limit_distance
         if self._account_id:
             payload["accountId"] = self._account_id
 

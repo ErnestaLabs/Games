@@ -115,10 +115,12 @@ class PredictionStore:
             win_prob = max(0.05, min(0.95, signal.graph_prob))
             won = random.random() < win_prob
             if won:
-                pnl = round(simulated_size_usdc * abs(signal.edge), 4)
+                # Win: collect the other side of the bet at market price
+                pnl = round(simulated_size_usdc * (1 - signal.market_price) / signal.market_price, 4)
                 record["outcome"] = "correct"
             else:
-                pnl = round(-simulated_size_usdc * signal.market_price, 4)
+                # Loss: lose the stake
+                pnl = round(-simulated_size_usdc, 4)
                 record["outcome"] = "incorrect"
             record["simulated_pnl"] = pnl
             record["resolved_at"] = _now_iso()
