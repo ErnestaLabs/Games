@@ -259,6 +259,7 @@ def scan_once(
                     confidence=signal.get("confidence", 0.5),
                     is_fee_free=signal.get("is_fee_free", False),
                     fee_schedule=signal.get("fee_schedule", {}),
+                    agent=signal.get("agent", ""),
                 )
 
                 # Always record for scoring + UK venue routing
