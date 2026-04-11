@@ -75,7 +75,7 @@ def _resolve_cert_paths() -> tuple[str, str]:
     """
     import base64, tempfile
 
-    # Strip all whitespace — Railway multi-line env vars embed spaces/newlines
+    # Strip all whitespace — Railway multi-line env vars embed spaces/newlines/tabs
     cert_b64 = "".join(os.environ.get("BETFAIR_CERT_B64", "").split())
     key_b64  = "".join(os.environ.get("BETFAIR_KEY_B64",  "").split())
     logger.info("Betfair cert resolution: BETFAIR_CERT_B64=%d chars, BETFAIR_KEY_B64=%d chars",
