@@ -176,13 +176,13 @@ class BetfairExecutor:
         # them through the proxy breaks HTTPS CONNECT tunneling with a 404 error.
         self._proxy = os.environ.get("BETFAIR_PROXY", "").strip() or None
         if self._proxy:
-            logger.info("Betfair: betting API routed via proxy %s (auth is direct)",
+            logger.info("Betfair: all traffic routed via proxy %s (auth + betting API)",
                         self._proxy.split("@")[-1])
 
-        # Auth client: NO proxy — identitysso.betfair.com is reachable from Railway directly.
-        self._auth_http = httpx.Client(timeout=20.0)
-        # Betting API client: proxy applied here to bypass BETTING_RESTRICTED_LOCATION.
+        # Both auth and betting API go through the proxy — Railway IP is geo-blocked
+        # by identitysso.betfair.com (403). The proxy is UK-based so auth succeeds.
         proxy_args = {"proxy": self._proxy} if self._proxy else {}
+        self._auth_http = httpx.Client(timeout=20.0, **proxy_args)
         self._http = httpx.Client(timeout=20.0, **proxy_args)
 
         self._authenticate()
