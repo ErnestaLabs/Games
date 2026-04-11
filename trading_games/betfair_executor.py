@@ -171,10 +171,18 @@ class BetfairExecutor:
         self._cert_path = cert_path
         self._key_path  = key_path
 
+        # Optional HTTP proxy to route around datacenter IP geo-blocks.
+        # Set BETFAIR_PROXY=http://user:pass@host:port on Railway.
+        # A UK residential proxy (Oxylabs, Brightdata, etc.) fixes BETTING_RESTRICTED_LOCATION.
+        self._proxy = os.environ.get("BETFAIR_PROXY", "").strip() or None
+        if self._proxy:
+            logger.info("Betfair: routing via proxy %s", self._proxy.split("@")[-1])
+
         # httpx client reused across calls (no cert attached here — cert only
         # needed for the initial certlogin call, which uses its own short-lived
         # client).
-        self._http = httpx.Client(timeout=20.0)
+        proxy_args = {"proxy": self._proxy} if self._proxy else {}
+        self._http = httpx.Client(timeout=20.0, **proxy_args)
 
         self._authenticate()
 
@@ -224,7 +232,8 @@ class BetfairExecutor:
             return False
 
         try:
-            with httpx.Client(cert=(cert_file, key_file), timeout=20.0) as cert_client:
+            proxy_args = {"proxy": self._proxy} if self._proxy else {}
+            with httpx.Client(cert=(cert_file, key_file), timeout=20.0, **proxy_args) as cert_client:
                 resp = cert_client.post(
                     _CERT_LOGIN_URL,
                     data={
