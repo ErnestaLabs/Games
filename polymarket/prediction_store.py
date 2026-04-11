@@ -93,9 +93,11 @@ class PredictionStore:
         }
 
         # In dry-run mode, simulate outcome immediately for feedback.
-        # In live mode, outcome stays null until market resolves.
+        # SIMULATE_SCORES=true forces simulation even in live mode (for leaderboard visibility).
+        # In live mode with neither flag, outcome stays null until market resolves.
         _dry = os.environ.get("DRY_RUN", "true").lower() not in ("false", "0", "no")
-        if _dry:
+        _sim = os.environ.get("SIMULATE_SCORES", "false").lower() in ("true", "1", "yes")
+        if _dry or _sim:
             win_prob = max(0.05, min(0.95, signal.graph_prob))
             won = random.random() < win_prob
             if won:
