@@ -356,6 +356,9 @@ class IGClient:
             if not self.authenticate():
                 return None
 
+        stop_distance = float(os.environ.get("IG_STOP_DISTANCE", "0") or 0)
+        limit_distance = float(os.environ.get("IG_LIMIT_DISTANCE", "0") or 0)
+
         payload = {
             "epic": epic,
             "direction": direction,
@@ -365,8 +368,10 @@ class IGClient:
             "expiry": "-",
             "forceOpen": False,
             "guaranteedStop": False,
-            "limitLevel": None,
+            "stopDistance": stop_distance if stop_distance > 0 else None,
+            "limitDistance": limit_distance if limit_distance > 0 else None,
             "stopLevel": None,
+            "limitLevel": None,
         }
         if self._account_id:
             payload["accountId"] = self._account_id
@@ -564,8 +569,9 @@ class IGClient:
         ("CS.D.XRPUSD.TODAY.IP",   "XRP"),
     ]
 
-    # Momentum threshold: trade if price moved >= 0.15% since last scan
-    _CRYPTO_MOMENTUM_PCT = float(os.environ.get("IG_CRYPTO_MOMENTUM_PCT", "0.0015"))
+    # Momentum threshold: trade if price moved >= 0.30% since last scan
+    # 0.15% fired on noise every scan and stacked positions — 0.30% requires real momentum
+    _CRYPTO_MOMENTUM_PCT = float(os.environ.get("IG_CRYPTO_MOMENTUM_PCT", "0.003"))
     # Size in £ per point (minimum on IG crypto is typically £1/pt)
     _CRYPTO_SIZE = float(os.environ.get("IG_CRYPTO_SIZE", "1.0"))
 
