@@ -401,6 +401,34 @@ class IGClient:
                     "IG order placed: epic=%s direction=%s size=%.2f dealRef=%s",
                     epic, direction, size, deal_ref,
                 )
+                # Poll confirms to get actual deal status and dealId
+                if deal_ref:
+                    import time as _time
+                    _time.sleep(1)
+                    try:
+                        conf = self._http.get(
+                            f"{self._base_url}/confirms/{deal_ref}",
+                            headers={**self._auth_headers(), "VERSION": "1"},
+                        )
+                        cdata = conf.json()
+                        status = cdata.get("dealStatus", "?")
+                        reason = cdata.get("reason", "")
+                        deal_id = cdata.get("dealId", "")
+                        if status == "ACCEPTED":
+                            logger.info(
+                                "IG confirmed ACCEPTED: dealId=%s epic=%s %s size=%.2f",
+                                deal_id, epic, direction, size,
+                            )
+                            result["dealId"] = deal_id
+                            result["confirmed"] = True
+                        else:
+                            logger.error(
+                                "IG order REJECTED: dealRef=%s status=%s reason=%s",
+                                deal_ref, status, reason,
+                            )
+                            result["confirmed"] = False
+                    except Exception as exc:
+                        logger.warning("IG confirms poll failed: %s", exc)
                 return result
             except ValueError as exc:
                 logger.error("IG place_order parse error: %s — body: %s", exc, body_text[:200])
