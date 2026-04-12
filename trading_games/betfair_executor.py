@@ -190,7 +190,7 @@ class BetfairExecutor:
     # ── Authentication ────────────────────────────────────────────────────────
 
     def _authenticate(self) -> None:
-        """Interactive login only — cert login removed (proxy incompatible with TLS client certs)."""
+        """Try cert login first (preferred), fall back to interactive login."""
         if not self._username or not self._password:
             logger.error(
                 "BETFAIR_USERNAME / BETFAIR_PASSWORD not set — "
@@ -200,6 +200,11 @@ class BetfairExecutor:
 
         if not self._app_key:
             logger.error("BETFAIR_APP_KEY not set — BetfairExecutor will not authenticate")
+            return
+
+        if self._cert_login():
+            logger.info("Betfair: authenticated via cert login")
+            self._authenticated = True
             return
 
         if self._interactive_login():
