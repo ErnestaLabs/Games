@@ -121,8 +121,8 @@ def _resolve_cert_paths() -> tuple[str, str]:
         cert_path = tmp / "betfair_client.crt"
         key_path  = tmp / "betfair_client.key"
         try:
-            cert_path.write_bytes(base64.b64decode(cert_b64))
-            key_path.write_bytes(base64.b64decode(key_b64))
+            cert_path.write_bytes(base64.b64decode(cert_b64).replace(b'\r\n', b'\n').replace(b'\r', b'\n'))
+            key_path.write_bytes(base64.b64decode(key_b64).replace(b'\r\n', b'\n').replace(b'\r', b'\n'))
             logger.info("Betfair cert decoded from env vars → %s", tmp)
             return str(cert_path), str(key_path)
         except Exception as exc:
