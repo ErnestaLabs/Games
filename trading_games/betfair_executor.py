@@ -73,7 +73,19 @@ def _resolve_cert_paths() -> tuple[str, str]:
     2. BETFAIR_CERT_PATH env var — explicit file path.
     3. Canonical local path: ../../../Forage_Landing/betfair_client.{crt,key}
     """
-    import base64, tempfile
+    import base64, re, tempfile
+
+    def _reformat_pem(raw: bytes) -> bytes:
+        """Normalise a PEM file: strip CRLF and reformat body to standard 64-char lines."""
+        pem = raw.replace(b'\r\n', b'\n').replace(b'\r', b'\n')
+        m = re.match(rb'(-----BEGIN [^\n]+\n)([\s\S]*?)(-----END [^\n]+\n?)', pem)
+        if not m:
+            return pem
+        header, body, footer = m.groups()
+        der = base64.b64decode(b''.join(body.split()))
+        b64 = base64.b64encode(der)
+        new_body = b'\n'.join(b64[i:i+64] for i in range(0, len(b64), 64)) + b'\n'
+        return header + new_body + footer
 
     # Strip all whitespace — Railway multi-line env vars embed spaces/newlines/tabs
     cert_b64 = "".join(os.environ.get("BETFAIR_CERT_B64", "").split())
@@ -121,8 +133,8 @@ def _resolve_cert_paths() -> tuple[str, str]:
         cert_path = tmp / "betfair_client.crt"
         key_path  = tmp / "betfair_client.key"
         try:
-            cert_path.write_bytes(base64.b64decode(cert_b64).replace(b'\r\n', b'\n').replace(b'\r', b'\n'))
-            key_path.write_bytes(base64.b64decode(key_b64).replace(b'\r\n', b'\n').replace(b'\r', b'\n'))
+            cert_path.write_bytes(_reformat_pem(base64.b64decode(cert_b64)))
+            key_path.write_bytes(_reformat_pem(base64.b64decode(key_b64)))
             logger.info("Betfair cert decoded from env vars → %s", tmp)
             return str(cert_path), str(key_path)
         except Exception as exc:
